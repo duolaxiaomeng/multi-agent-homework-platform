@@ -1,0 +1,16 @@
+# 密钥与账号（早期版本可能留在项目目录；现已改存 ~/.student-stats/）
+settings.json
+users.json
+
+# 本地业务数据与学生照片（含学生个人信息，不要提交）
+data.json
+uploads/
+agent输出/
+
+# Agent 灵魂文件（个人定制；代码里自带默认版，首次运行自动生成）
+agent.md
+
+# 系统与缓存
+.DS_Store
+__pycache__/
+*.pyc
