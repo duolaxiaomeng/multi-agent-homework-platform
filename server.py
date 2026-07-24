@@ -288,7 +288,6 @@ DEFAULT_SOUL = '''# 学习总结 Agent 灵魂设定
 
 ## 红线
 - 只依据提供的材料（做题截图、错题记录、老师描述的课堂表现）写作，绝不编造题目、分数、名次或表现。
-- 「题目截图」小节由系统按真实截图自动附加到文档末尾，正文中不要自己编写图片链接或文件路径。
 - 某部分材料不足时，如实写明“本节课材料不足，未做评估”，不要虚构内容补足结构。
 - 语气对家长友好、具体、不夸张，不使用“差”“不行”等定性词。
 '''
@@ -351,21 +350,6 @@ def build_overview_context(data):
             flags.append("有做题截图" if p.get("image") and (ROOT / p["image"]).is_file() else "无做题截图")
             lines.append(f"  {ldesc}：" + "；".join(flags))
     return "\n".join(lines)
-
-def attach_screenshots(md_text, image_paths, base_name, out_dir):
-    """把真实做题截图复制到文档旁的 images/ 目录，并在文末生成“题目截图”小节（图片链接只由系统生成，防止编造）。"""
-    md_text = re.sub(r"\n*#{2,4}\s*(题目|完成情况)截图[：:]?.*$", "", md_text, flags=re.S).rstrip()
-    if not image_paths: return md_text
-    img_dir = out_dir / "images"
-    img_dir.mkdir(parents=True, exist_ok=True)
-    parts = [md_text, "", "#### 题目截图：", ""]
-    for i, img in enumerate(image_paths, 1):
-        src = ROOT / img
-        if not src.is_file(): continue
-        dst = img_dir / f"{base_name}-{i}{src.suffix or '.png'}"
-        dst.write_bytes(src.read_bytes())
-        parts += [f"![{base_name}](images/{dst.name})", ""]
-    return "\n".join(parts)
 
 def chat_model(settings, system_prompt, messages):
     """以 system_prompt 为“灵魂”调用所选模型；messages 为 OpenAI 兼容消息列表。"""
@@ -505,8 +489,6 @@ class App(SimpleHTTPRequestHandler):
                     md_text = (fence.group(1) if fence else reply).strip()
                 if md_text:
                     who = mentioned[0]["name"] if mentioned else "学习总结"
-                    if mentioned_imgs:
-                        md_text = attach_screenshots(md_text, [img for _, img in mentioned_imgs[:4]], who, AGENT_OUTPUT_DIR)
                     date = time.strftime("%Y-%m-%d")
                     AGENT_OUTPUT_DIR.mkdir(exist_ok=True)
                     path, n = AGENT_OUTPUT_DIR / f"{who}-{date}.md", 1
@@ -535,7 +517,6 @@ class App(SimpleHTTPRequestHandler):
                     content += [{"type": "text", "text": "做题情况截图："}, {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{raw}"}}]
                 markdown = chat_model(read_settings(), read_soul(), [{"role": "user", "content": content}])
                 save_path = resolve_save_path(body.get("savePath", ""), student, lesson)
-                markdown = attach_screenshots(markdown, images, student["name"], save_path.parent)
                 save_path.parent.mkdir(parents=True, exist_ok=True)
                 save_path.write_text(markdown, encoding="utf-8")
                 return self.send_json({"markdown": markdown, "path": str(save_path)}, 201)
