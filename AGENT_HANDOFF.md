@@ -152,11 +152,20 @@ performances: id, classId, assignmentId, row, col, studentId, tags[], note, imag
 | POST | `/api/agent/chat` | Agent 会话。system 为 agent.md + 全量数据概览（班级/课程/每个学生错题与表现、有无截图）；消息提及学生姓名时自动附其做题截图（DeepSeek 等纯文本模型除外） |
 | POST | `/api/agent/generate` | 生成学习总结 Markdown 并保存到指定路径；无当节课做题截图时拒绝（防编造红线） |
 
-### 学习总结 Agent
+### 学习总结 Agent（多智能体）
 
-- 灵魂文件：`agent.md`（项目根目录，首次访问自动创建默认内容；在“设置”页可视化编辑）。
-- 生成输入：所选学生+课程的错题记录、课堂表现（tags/note/workNote）、做题截图（`performances.image` / `mistakes.image`，须真实存在）。
+- 智能体 = 一个灵魂 md 文件：通用区 `agents/*.md`（内置模板：通用、语文、算法评判，代码内置首次自动生成）；个人空间 `agents/<用户名>/*.md`（在通用基础上覆盖或自建）。同名时个人优先。
+- 旧版单文件 `agent.md` 启动时自动迁移为 `agents/通用.md`。
+- 灵魂文件支持可选 front matter 绑定模型：`---\nmodel: mimo-v2.5-pro\n---`，不填跟随设置中的当前模型。
+- 会话/生成请求带 `agent` 字段（默认“通用”）；会话页可按智能体切换，历史互相隔离。
+- 生成输入：所选学生+课程的错题记录、课堂表现（tags/note/workNote）、做题截图（须真实存在，否则拒绝——防编造红线）。
 - 保存位置：请求字段 `savePath`；相对路径落到 `agent输出/` 目录，留空自动命名 `姓名-日期.md`，也支持绝对路径（本地运行，后续再做限制）。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/agents` | 当前用户可见的智能体列表（通用+我的合并） |
+| GET/POST/DELETE | `/api/agents/:name` | 读/存/删智能体灵魂（写入个人空间；管理员传 `{"base":true}` 写通用区） |
+| POST | `/api/agents` | 新建智能体（`{"name":"…","from":"模板名"}` 从模板复制） |
 | POST | `/api/analyze` | 分析学生作业，错题挂到 `assignmentId` 指定的课程（不传则自动新建课程） |
 | DELETE | `/api/classes/:id` | 删除班级及其学生 |
 | DELETE | `/api/students/:id` | 删除学生 |

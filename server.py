@@ -2,7 +2,7 @@
 """本地运行的学生错题管理与统计系统。"""
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime
@@ -257,8 +257,9 @@ REPORT_PROMPT = '''你是严谨的中小学课堂内容整理助手。分析课�
 {"title":"本节课名称","lessonSummary":"课堂内容摘要","knowledgePoints":["知识点"]}'''
 
 # ---------------- 学习总结 Agent ----------------
-# Agent 的“灵魂”保存在 agent.md，老师可在“设置”页直接修改。
+# Agent 的“灵魂”按智能体分别保存在 agents/ 目录（一个 md 一个智能体），老师可在“设置”页管理。
 AGENT_FILE = ROOT / "agent.md"
+AGENTS_DIR = ROOT / "agents"
 AGENT_OUTPUT_DIR = ROOT / "agent输出"
 DEFAULT_SOUL = '''# 学习总结 Agent 灵魂设定
 
@@ -292,12 +293,106 @@ DEFAULT_SOUL = '''# 学习总结 Agent 灵魂设定
 - 语气对家长友好、具体、不夸张，不使用“差”“不行”等定性词。
 '''
 
-def read_soul():
-    if not AGENT_FILE.exists():
-        try: AGENT_FILE.write_text(DEFAULT_SOUL, encoding="utf-8")
+CHINESE_SOUL = '''# 语文智能体灵魂设定
+
+你是一名中小学语文老师助手，擅长作文点评、阅读分析与家长沟通。
+
+## 你的任务
+1. 根据学生作业照片或老师输入，点评作文与阅读题：先指出亮点（好词好句、结构、立意），再给出具体可操作的修改建议。
+2. 把老师的课堂观察润色为家长易读、易接受的表述。
+3. 需要时汇总成一篇本节课的语文学习总结（Markdown 格式）。
+
+## 输出格式
+## 学生姓名
+#### 课堂表现：
+#### 知识点掌握：
+#### 本堂课学习内容：
+#### 完成题目：
+#### 课后建议：
+
+## 红线
+- 只依据提供材料写作，不编造作文内容、分数或表现；材料不足如实说明。
+- 评价以鼓励为主，建议具体、对事不对人。
+'''
+
+ALGO_SOUL = '''# 算法评判智能体灵魂设定
+
+你是一名信息学/编程课老师助手，专注评判算法题完成情况。
+
+## 你的任务
+1. 从做题截图识别每道题的题号、名称与评测状态（Accepted、部分分、Wrong Answer、编译错误等）。
+2. 分析错误类型：语法问题、逻辑错误、边界遗漏、复杂度不达标；能定位到具体条件的尽量指出。
+3. 给出每道未通过题的订正思路（讲方法，不直接给完整答案）。
+4. 汇总成评判报告（Markdown 格式）；完成题目按 [**P1234 题目名称**](https://chuanshuo.com.cn/d/题集代码/p/P1234) 格式附链接，题集代码按班级确定（如 12 班为 CPP2026_12），不确定时用 CPP2026_03。
+
+## 输出格式
+## 学生姓名
+#### 课堂表现：
+#### 知识点掌握：
+#### 本堂课学习内容：
+#### 完成题目：
+#### 课后建议：
+
+## 红线
+- 只依据截图与记录评判，看不清的题目标注“待确认”，绝不编造题号与评测结果。
+'''
+
+DEFAULT_SOULS = {"通用": DEFAULT_SOUL, "语文": CHINESE_SOUL, "算法评判": ALGO_SOUL}
+
+def agent_dir(user):
+    return AGENTS_DIR / user["username"]
+
+def safe_agent_name(name):
+    if not re.fullmatch(r"[\w\-（）() ]{1,30}", name): raise ValueError("智能体名称需为 1-30 位，可含中文、字母、数字")
+    return name
+
+def seed_agents():
+    """首次运行：迁移旧的单灵魂 agent.md，并生成内置智能体模板。"""
+    AGENTS_DIR.mkdir(exist_ok=True)
+    if AGENT_FILE.exists():
+        target = AGENTS_DIR / "通用.md"
+        if not target.exists():
+            try: target.write_text(AGENT_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+            except OSError: pass
+        try: AGENT_FILE.unlink()
         except OSError: pass
-    try: return AGENT_FILE.read_text(encoding="utf-8")
-    except OSError: return DEFAULT_SOUL
+    for name, soul in DEFAULT_SOULS.items():
+        f = AGENTS_DIR / f"{name}.md"
+        if not f.exists():
+            try: f.write_text(soul, encoding="utf-8")
+            except OSError: pass
+
+def soul_path(name, user):
+    """个人空间优先，其次通用区；返回 (路径, 来源)。"""
+    mine = agent_dir(user) / f"{name}.md"
+    if mine.is_file(): return mine, "mine"
+    base = AGENTS_DIR / f"{name}.md"
+    if base.is_file(): return base, "base"
+    return None, None
+
+def list_agents(user):
+    items = {f.stem: {"name": f.stem, "source": "base"} for f in sorted(AGENTS_DIR.glob("*.md"))}
+    if agent_dir(user).is_dir():
+        for f in sorted(agent_dir(user).glob("*.md")):
+            items[f.stem] = {"name": f.stem, "source": "mine"}
+    return list(items.values())
+
+def read_agent_soul(name, user):
+    path, _ = soul_path(name, user)
+    if not path: raise ValueError("智能体不存在")
+    return path.read_text(encoding="utf-8")
+
+def parse_soul(text):
+    """解析灵魂文件可选的 front matter（--- model: xxx ---），返回 (meta, 正文)。"""
+    meta = {}
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.S)
+    if m:
+        for line in m.group(1).splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                meta[k.strip()] = v.strip()
+        text = text[m.end():]
+    return meta, text
 
 def resolve_save_path(raw, student, lesson):
     raw = (raw or "").strip()
@@ -410,7 +505,17 @@ class App(SimpleHTTPRequestHandler):
             return self.send_json({"user": public_user(user)})
         if path == "/api/agent/soul":
             if self.user.get("role") == "student": return self.send_json({"error": "学生账号无权查看"}, 403)
-            return self.send_json({"soul": read_soul()})
+            return self.send_json({"soul": read_agent_soul("通用", self.user)})
+        if path == "/api/agents":
+            if self.user.get("role") == "student": return self.send_json({"error": "学生账号无权查看"}, 403)
+            return self.send_json({"agents": list_agents(self.user)})
+        if path.startswith("/api/agents/"):
+            if self.user.get("role") == "student": return self.send_json({"error": "学生账号无权查看"}, 403)
+            name = unquote(path[len("/api/agents/"):])
+            try:
+                return self.send_json({"name": name, "soul": read_agent_soul(name, self.user), "source": soul_path(name, self.user)[1]})
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, 404)
         if path == "/api/users":
             if not self.require_admin(): return
             store = read_users()
@@ -451,20 +556,40 @@ class App(SimpleHTTPRequestHandler):
                 return self.send_json({"error": "学生账号仅可查看自己的错题"}, 403)
             data = read_data()
             if path == "/api/agent/soul":
-                AGENT_FILE.write_text(body.get("soul", ""), encoding="utf-8")
+                agent_dir(self.user).mkdir(parents=True, exist_ok=True)
+                (agent_dir(self.user) / "通用.md").write_text(body.get("soul", ""), encoding="utf-8")
+                return self.send_json({"ok": True})
+            if path == "/api/agents":
+                name = safe_agent_name(body.get("name", "").strip())
+                if soul_path(name, self.user)[0]: raise ValueError("同名智能体已存在")
+                src = body.get("from", "")
+                text = read_agent_soul(src, self.user) if src else "# 智能体灵魂设定\n\n（在这里描述这个智能体的定位、任务与输出要求）\n"
+                agent_dir(self.user).mkdir(parents=True, exist_ok=True)
+                (agent_dir(self.user) / f"{name}.md").write_text(text, encoding="utf-8")
+                return self.send_json({"ok": True}, 201)
+            if path.startswith("/api/agents/"):
+                name = safe_agent_name(unquote(path[len("/api/agents/"):]))
+                if body.get("base"):
+                    if not self.require_admin(): return
+                    (AGENTS_DIR / f"{name}.md").write_text(body.get("soul", ""), encoding="utf-8")
+                else:
+                    agent_dir(self.user).mkdir(parents=True, exist_ok=True)
+                    (agent_dir(self.user) / f"{name}.md").write_text(body.get("soul", ""), encoding="utf-8")
                 return self.send_json({"ok": True})
             if path == "/api/agent/chat":
                 messages = [{"role": m.get("role"), "content": str(m.get("content", ""))[:4000]} for m in body.get("messages", [])[-20:] if m.get("role") in ("user", "assistant")]
                 if not messages: raise ValueError("请输入内容")
-                system = read_soul() + "\n\n" + build_overview_context(data)
+                soul_meta, soul_body = parse_soul(read_agent_soul(body.get("agent", "") or "通用", self.user))
+                settings = read_settings()
+                if soul_meta.get("model") in MODELS: settings = {**settings, "model": soul_meta["model"]}
+                system = soul_body + "\n\n" + build_overview_context(data)
                 student = next((s for s in data["students"] if s["id"] == body.get("studentId", "")), None)
                 lesson = next((a for a in data["assignments"] if a["id"] == body.get("assignmentId", "")), None)
                 if student and lesson:
                     mistakes = [m for m in data["mistakes"] if m.get("studentId") == student["id"] and m.get("assignmentId") == lesson["id"]]
                     perfs = [p for p in data["performances"] if p.get("studentId") == student["id"] and p.get("assignmentId", "") == lesson["id"]]
                     system += "\n\n当前对话选中的学生与课程详情：\n" + build_agent_context(student, lesson, mistakes, perfs, 0)
-                # 消息中提到学生姓名时，收集ta的做题截图：多模态模型直接附图分析，生成的文档末尾也会附上截图小节。
-                settings = read_settings()
+                # 消息中提到学生姓名时，收集ta的做题截图：多模态模型直接附图分析（纯文本模型除外）。
                 choice = MODELS.get(settings["model"], {})
                 user_text = messages[-1]["content"] if messages[-1]["role"] == "user" else ""
                 mentioned = [s for s in data["students"] if s["name"] and s["name"] in user_text]
@@ -515,7 +640,10 @@ class App(SimpleHTTPRequestHandler):
                 for img in images:
                     raw, mime = image_part(img)
                     content += [{"type": "text", "text": "做题情况截图："}, {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{raw}"}}]
-                markdown = chat_model(read_settings(), read_soul(), [{"role": "user", "content": content}])
+                soul_meta, soul_body = parse_soul(read_agent_soul(body.get("agent", "") or "通用", self.user))
+                gen_settings = read_settings()
+                if soul_meta.get("model") in MODELS: gen_settings = {**gen_settings, "model": soul_meta["model"]}
+                markdown = chat_model(gen_settings, soul_body, [{"role": "user", "content": content}])
                 save_path = resolve_save_path(body.get("savePath", ""), student, lesson)
                 save_path.parent.mkdir(parents=True, exist_ok=True)
                 save_path.write_text(markdown, encoding="utf-8")
@@ -674,6 +802,15 @@ class App(SimpleHTTPRequestHandler):
             if victim["id"] == self.user["id"]: return self.send_json({"error": "不能删除当前登录的账号"}, 400)
             store["users"] = [u for u in store["users"] if u["id"] != item_id]
             write_users(store); return self.send_json({"ok": True})
+        if collection == "agents":
+            name = safe_agent_name(unquote(item_id))
+            mine = agent_dir(self.user) / f"{name}.md"
+            if mine.is_file():
+                mine.unlink(); return self.send_json({"ok": True})
+            if self.user.get("role") == "admin" and (AGENTS_DIR / f"{name}.md").is_file():
+                if name == "通用": return self.send_json({"error": "通用智能体不能删除"}, 400)
+                (AGENTS_DIR / f"{name}.md").unlink(); return self.send_json({"ok": True})
+            return self.send_json({"error": "智能体不存在或无权删除"}, 404)
         plural = {"classes":"classes", "students":"students", "assignments":"assignments", "mistakes":"mistakes", "seats":"seats", "performances":"performances"}.get(collection)
         if not plural: return self.send_json({"error":"接口不存在"}, 404)
         data = read_data(); data[plural] = [x for x in data[plural] if x["id"] != item_id]
@@ -683,5 +820,8 @@ class App(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     migrate_local_secrets()
     seed_admin()
-    print("\n学生管理与统计系统已启动：http://localhost:8765\n按 Ctrl+C 可停止服务。")
-    ThreadingHTTPServer(("127.0.0.1", 8765), App).serve_forever()
+    seed_agents()
+    host = os.environ.get("STATS_HOST", "127.0.0.1")
+    port = int(os.environ.get("STATS_PORT", "8765"))
+    print(f"\n学生管理与统计系统已启动：http://{host}:{port}\n按 Ctrl+C 可停止服务。")
+    ThreadingHTTPServer((host, port), App).serve_forever()

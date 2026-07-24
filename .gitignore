@@ -9,6 +9,7 @@ agent输出/
 
 # Agent 灵魂文件（个人定制；代码里自带默认版，首次运行自动生成）
 agent.md
+agents/
 
 # 系统与缓存
 .DS_Store

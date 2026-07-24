@@ -125,3 +125,18 @@
 .md-body code{background:#f0f2f8;border-radius:4px;padding:1px 5px;font-size:12px}
 .md-body ul,.md-body ol{margin:6px 0;padding-left:22px;line-height:1.8}
 .md-body a{color:var(--purple);word-break:break-all}
+
+/* 智能体管理 */
+.agent-mgr{display:grid;grid-template-columns:150px 1fr;gap:14px}
+.agent-side{display:grid;gap:8px;align-content:start}
+.agent-item{border:1px solid var(--line);background:#f8f9fd;border-radius:8px;padding:9px 10px;text-align:left;cursor:pointer;font-size:13px;display:grid;gap:2px;color:var(--ink)}
+.agent-item small{color:var(--muted);font-size:11px}
+.agent-item.active{border-color:var(--purple);background:#f7f5ff;font-weight:600}
+#agent-new{border:1px dashed #cfd5e9;background:#fff;border-radius:8px;padding:8px;cursor:pointer;font-size:12px;color:var(--muted)}
+#agent-new:hover{border-color:var(--purple);color:var(--purple)}
+.agent-main{display:grid;gap:10px}
+.agent-meta-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.agent-meta-row span:first-child{font-weight:600;font-size:14px}
+.agent-meta-row select{margin-left:auto;max-width:190px}
+.agent-picker-row{margin-bottom:12px}
+.agent-picker-row label{display:flex;align-items:center;gap:8px;font-size:13px}
