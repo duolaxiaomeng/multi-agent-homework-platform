@@ -371,10 +371,11 @@ def soul_path(name, user):
     return None, None
 
 def list_agents(user):
-    items = {f.stem: {"name": f.stem, "source": "base"} for f in sorted(AGENTS_DIR.glob("*.md"))}
+    items = {f.stem: {"name": f.stem, "source": "base"} for f in sorted(AGENTS_DIR.glob("*.md")) if not f.name.startswith("._")}
     if agent_dir(user).is_dir():
         for f in sorted(agent_dir(user).glob("*.md")):
-            items[f.stem] = {"name": f.stem, "source": "mine"}
+            if not f.name.startswith("._"):
+                items[f.stem] = {"name": f.stem, "source": "mine"}
     return list(items.values())
 
 def read_agent_soul(name, user):
