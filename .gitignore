@@ -15,3 +15,7 @@ agents/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Python 虚拟环境（智能导入助手的 Excel/PDF 解析依赖）
+.venv/
+data_v1_backup.json

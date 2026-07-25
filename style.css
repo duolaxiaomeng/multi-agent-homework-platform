@@ -256,3 +256,174 @@
 .img-card{background:#fff;border-radius:13px;padding:18px;width:min(860px,94vw);max-height:90vh;display:grid;gap:12px;grid-template-rows:auto 1fr}
 #img-modal-img{max-width:100%;max-height:72vh;object-fit:contain;border-radius:8px;border:1px solid var(--line);justify-self:center}
 #img-modal .md-head button{background:#f0f2f8;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:13px}
+
+/* 智能导入助手 */
+.ia-single{max-width:860px;margin:0 auto;display:flex;flex-direction:column;height:calc(100vh - 150px)}
+.ia-single .agent-chat{flex:1;max-height:none;min-height:0;background:#fafbff;border:1px solid var(--line);border-radius:12px;padding:14px}
+.ia-single .chat-input{margin-top:10px;align-items:center}
+.ia-attach{background:#f0f2f8;border:0;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:16px;line-height:1}
+.ia-attach:hover{background:#e4e8f2}
+.ia-srcs{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:4px 0 12px}
+.ia-src{display:block;background:#f7f8fc;border:1.5px solid var(--line);border-radius:10px;padding:12px;cursor:pointer}
+.ia-src input{display:none}
+.ia-src b{display:block;font-size:14px;margin-bottom:4px}
+.ia-src span{font-size:12px;color:var(--muted);line-height:1.6;display:block}
+.ia-src.active{border-color:var(--purple);background:#f0eeff}
+.ia-photo-hint{color:#8a6d1d;margin-top:6px}
+.ia-files{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.ia-files>button{background:#f0f2f8;border:0;border-radius:8px;padding:8px 13px;cursor:pointer;font-size:13px}
+.ia-files>.muted{font-size:12px}
+.ia-file-list{display:flex;gap:6px;flex-wrap:wrap;width:100%}
+.ia-chip{background:#eef0f4;border-radius:8px;padding:4px 9px;font-size:12px;display:inline-flex;gap:6px;align-items:center}
+.ia-chip button{border:0;background:transparent;cursor:pointer;color:#c9515c;padding:0;font-size:12px}
+.ia-chat{display:grid;gap:8px;max-height:380px;overflow:auto;align-content:start;background:#fafbff;border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px}
+.ia-line{font-size:12px;color:var(--muted)}
+.ia-err{font-size:13px;color:#c9515c;white-space:pre-wrap;word-break:break-word}
+.ia-draft{background:#fff7e6;border-radius:10px;padding:12px;margin-top:12px}
+.ia-draft h3{margin:0 0 6px;font-size:14px}
+.ia-sum{font-size:12px;color:#8a6d1d;margin:0 0 8px}
+.ia-warn{font-size:12px;color:#c9515c;background:#fff0f1;border-radius:6px;padding:6px 9px;margin:6px 0}
+.ia-table{width:100%;border-collapse:collapse;font-size:12px;margin:8px 0}
+.ia-table th,.ia-table td{border:1px solid #f0e2bd;padding:4px 7px;text-align:left}
+.ia-draft .rv-actions{margin-top:8px}
+.chat-input{margin-top:10px}
+@media(max-width:900px){.ia-srcs{grid-template-columns:1fr}}
+
+/* v0.3 学生管理底座 */
+/* 班级卡片 */
+#class-panel{display:flex;flex-direction:column}
+#class-cards{display:flex;flex-direction:column;gap:10px;flex:1;overflow:auto;margin-bottom:12px}
+.class-card{background:#f7f8fc;border:1.5px solid var(--line);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px;cursor:default}
+.class-card:hover{border-color:var(--purple2)}
+.class-card.selected{border-color:var(--purple);background:#f7f5ff}
+.class-card.archived{opacity:.65;background:#eef0f4}
+.cc-head{display:flex;justify-content:space-between;align-items:center}
+.cc-head b{font-size:15px}
+.cc-archived-tag{font-size:11px;background:#c9515c;color:#fff;border-radius:10px;padding:1px 7px}
+.cc-stats{font-size:12px;color:var(--muted)}
+.cc-warn{color:#b07908}
+.cc-actions{display:flex;gap:6px}
+.cc-actions button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;color:var(--ink)}
+.cc-actions button:hover{background:#f0f2f8}
+.cc-actions .danger{color:#c9515c;border-color:#ffd9dd}
+.cc-actions .danger:hover{background:#fff0f1}
+
+/* 学生面板 */
+#student-panel{display:flex;flex-direction:column;min-height:0}
+#student-content{display:flex;flex-direction:column;gap:12px;flex:1;min-height:0}
+.stu-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.stu-toolbar input[type=text],.stu-toolbar select{width:auto;min-width:100px;padding:7px 10px;font-size:13px}
+.stu-toolbar #stu-search{width:160px}
+.stu-check{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);white-space:nowrap;font-weight:400}
+.stu-check input{margin:0}
+.stu-toolbar button{padding:7px 13px;font-size:12px;white-space:nowrap}
+#stu-export-btn,#stu-import-btn{background:#f0f2f8;border:0;border-radius:8px;cursor:pointer;color:var(--ink)}
+#stu-export-btn:hover,#stu-import-btn:hover{background:#e5e9f5}
+.stu-inline-form{display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:#fafbff;border:1px solid var(--line);border-radius:8px;padding:10px}
+.stu-inline-form input,.stu-inline-form select{padding:6px 8px;font-size:12px;border:1px solid var(--line);border-radius:6px;min-width:0}
+.stu-inline-form button{padding:6px 12px;font-size:12px;white-space:nowrap}
+#stu-inline-cancel{background:#f0f2f8;border:0;border-radius:6px;cursor:pointer;color:var(--muted)}
+
+/* 学生表格 */
+.stu-table-wrap{overflow-x:auto;flex:1;min-height:0}
+.stu-table{width:100%;border-collapse:collapse;font-size:13px}
+.stu-table th{text-align:left;padding:8px 10px;border-bottom:2px solid var(--line);color:var(--muted);font-weight:600;font-size:12px;white-space:nowrap}
+.stu-table td{padding:8px 10px;border-bottom:1px solid #f0f2f8;white-space:nowrap}
+.stu-table tbody tr:hover{background:#fafbff}
+.stu-table .tr-archived{opacity:.55}
+.stu-name-link{color:var(--purple);cursor:pointer;font-weight:600}
+.stu-name-link:hover{text-decoration:underline}
+.stu-ops{display:flex;gap:4px;flex-wrap:wrap}
+.stu-ops button{border:0;border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;background:#f0f2f8;color:var(--ink)}
+.stu-ops button:hover{background:#e5e9f5}
+.stu-ops .stu-archive-btn{color:#b07908}
+.stu-ops .stu-archive-btn:hover{background:#fff7e6}
+.stu-ops .stu-transfer-btn{color:var(--purple)}
+.stu-ops .stu-transfer-btn:hover{background:#f0eeff}
+
+/* missing student number warning */
+.stu-warn{background:#fff7e6;border:1px solid #ffe4a0;border-radius:8px;padding:10px 14px;font-size:13px;color:#8a6d1d}
+.stu-warn b{color:#b07908}
+
+/* 标签 */
+.tag{border-radius:10px;padding:2px 8px;font-size:11px;font-weight:600}
+.tag.active{background:#e5f6ef;color:#2c8c5f}
+.tag.archived{background:#eef0f4;color:#8a90a5}
+.tag.bound{background:#e5f6ef;color:#2c8c5f;margin-left:4px}
+.tag.unbound{background:#fff0f1;color:#c9515c;margin-left:4px}
+.tag.import-new{background:#e5f6ef;color:#2c8c5f}
+.tag.import-conflict{background:#fff7e6;color:#b07908}
+.tag.import-duplicate{background:#eef0f4;color:#8a90a5}
+.tag.import-error{background:#fff0f1;color:#c9515c}
+
+/* 学生详情模态 */
+.stu-modal-bg{position:fixed;inset:0;background:#18213b88;display:none;align-items:center;justify-content:center;z-index:150}
+.stu-modal-bg.show{display:flex}
+.stu-modal-card{background:#fff;border-radius:13px;padding:22px;width:min(680px,92vw);max-height:84vh;display:grid;gap:14px;grid-template-rows:auto 1fr}
+.stu-modal-card.wide{width:min(860px,94vw)}
+.stu-modal-card .md-head h2{margin:0}
+#stu-detail-body{overflow:auto}
+.stu-detail-grid{display:flex;flex-direction:column;gap:16px}
+.stu-detail-section h3{font-size:14px;margin:0 0 10px;color:var(--ink)}
+.stu-info-rows{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stu-info-row{display:flex;justify-content:space-between;align-items:center;background:#f7f8fc;border-radius:8px;padding:8px 12px;font-size:13px}
+.stu-info-row span:first-child{color:var(--muted)}
+.stu-info-row input,.stu-info-row select{padding:5px 8px;font-size:13px;border:1px solid var(--line);border-radius:6px;width:140px}
+.stu-stats-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.stu-stat{background:#f7f8fc;border-radius:8px;padding:10px;text-align:center;display:flex;flex-direction:column;gap:4px}
+.stu-stat b{font-size:20px;color:var(--purple)}
+.stu-stat span{font-size:11px;color:var(--muted)}
+.stu-perf-list,.stu-lesson-list,.stu-fb-list,.stu-hist-list{display:flex;flex-direction:column;gap:6px}
+.stu-perf-item,.stu-lesson-item,.stu-fb-item,.stu-hist-item{background:#f7f8fc;border-radius:8px;padding:8px 12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+.stu-perf-item b{font-size:12px}
+.stu-tag{background:#f0eeff;color:#5848d3;border-radius:8px;padding:2px 7px;font-size:11px}
+.stu-perf-note{color:var(--muted);font-size:12px;flex:1}
+.stu-lesson-item span:first-child{min-width:120px}
+.stu-fb-item{justify-content:space-between}
+
+/* 批量导入 */
+.import-step{display:flex;flex-direction:column;gap:12px}
+.import-step label{font-size:13px;font-weight:600;display:flex;flex-direction:column;gap:6px}
+.import-step select{max-width:260px}
+.import-methods{display:flex;gap:0}
+.import-method-tab{border:1px solid var(--line);background:#f7f8fc;padding:8px 18px;font-size:13px;cursor:pointer;color:var(--muted)}
+.import-method-tab:first-child{border-radius:8px 0 0 8px}
+.import-method-tab:last-child{border-radius:0 8px 8px 0}
+.import-method-tab.active{background:var(--purple);color:#fff;border-color:var(--purple)}
+#import-text{width:100%;font-family:ui-monospace,Menlo,monospace;font-size:13px;border:1px solid var(--line);border-radius:8px;padding:10px}
+#import-file-area input{font-size:13px}
+.import-summary{display:flex;gap:16px;margin:14px 0;font-size:13px}
+.import-summary span b{color:var(--purple)}
+.tr-import-new{background:#f5fdf9}
+.tr-import-conflict{background:#fffdf5}
+.tr-import-duplicate{background:#f8f9fd}
+.tr-import-error{background:#fff5f5}
+.import-actions{display:flex;gap:8px;margin-top:12px}
+#import-cancel-btn{background:#f0f2f8;border:0;border-radius:8px;padding:11px 16px;cursor:pointer;font-size:14px;color:var(--ink)}
+
+/* 绑定弹窗 */
+.bind-popup{position:fixed;z-index:200;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px;display:flex;gap:8px;box-shadow:0 6px 20px #15204a18}
+.bind-popup select{min-width:160px;padding:7px 10px;font-size:13px;border:1px solid var(--line);border-radius:6px}
+.bind-popup button{padding:7px 13px;font-size:12px;cursor:pointer;border:0;border-radius:6px}
+.bind-popup .bind-cancel{background:#f0f2f8;color:var(--ink)}
+
+/* 移动端优化 v0.3 */
+@media(max-width:768px){
+	.stu-table-wrap{-webkit-overflow-scrolling:touch}
+	.stu-toolbar{flex-direction:column;align-items:stretch}
+	.stu-toolbar input,.stu-toolbar select{width:100%!important}
+	.stu-toolbar #stu-search{width:100%!important}
+	.stu-table{font-size:12px}
+	.stu-table th,.stu-table td{padding:6px}
+	.stu-ops{flex-direction:column;gap:2px}
+	.stu-stats-cards{grid-template-columns:repeat(2,1fr)}
+	.stu-info-rows{grid-template-columns:1fr}
+	.stu-modal-card{width:96vw;padding:14px}
+	nav{grid-template-columns:1fr 1fr}
+	#import-text{font-size:12px}
+	aside{width:200px;padding:20px 12px}
+	main{padding:20px 16px}
+	.stu-inline-form{flex-direction:column;align-items:stretch}
+	.stu-inline-form input,.stu-inline-form select{width:100%}
+}
+

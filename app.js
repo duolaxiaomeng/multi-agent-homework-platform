@@ -1,4 +1,4 @@
-let data={classes:[],students:[],assignments:[],mistakes:[],seats:[],performances:[]}, settings={}, dashboardClass='', token=localStorage.getItem('token')||'', currentUser=null, seatClass='', seatLesson='', selSeat=null, seatDraftImage='';
+let data={classes:[],students:[],assignments:[],mistakes:[],seats:[],performances:[]}, settings={}, dashboardClass='', token=localStorage.getItem('token')||'', currentUser=null, seatClass='', seatLesson='', selSeat=null, seatDraftImage='', selClassId='', stuSearch='', stuStatusFilter='', stuShowArchived=false;
 const $=s=>document.querySelector(s), esc=s=>String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const ROLE_NAMES={admin:'管理员',teacher:'老师',student:'学生'};
 const SEAT_TAGS=['积极发言','认真听讲','思考深入','合作良好','进步明显','需要关注'];
@@ -6,13 +6,13 @@ async function api(url,opts={}){opts.headers={...(opts.headers||{}),...(token?{A
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
 function showAuth(){$('#auth-screen').classList.add('show')} function hideAuth(){$('#auth-screen').classList.remove('show')}
 function setSession(t,u){token=t;localStorage.setItem('token',t);currentUser=u;$('#user-chip').textContent=`${u.realName||u.username} · ${ROLE_NAMES[u.role]||u.role}`;applyRole()}
-function applyRole(){const r=currentUser?.role;document.body.classList.toggle('role-student',r==='student');const acc=$('#settings-accounts');if(acc)acc.style.display=r==='admin'?'':'none';const navAcc=$('#nav-accounts');if(navAcc)navAcc.style.display='none';if(r==='student'){document.querySelectorAll('.page').forEach(x=>x.classList.remove('show'));$('#student-home').classList.add('show');$('#page-title').textContent='我的错题';$('#subtitle').textContent='老师录入并确认后的错题会显示在这里'}}
+function applyRole(){const r=currentUser?.role;document.body.classList.toggle('role-student',r==='student');const acc=$('#settings-accounts');if(acc)acc.style.display=r==='admin'?'':'none';const bak=$('#settings-backup');if(bak)bak.style.display=r==='admin'?'':'none';const navAcc=$('#nav-accounts');if(navAcc)navAcc.style.display='none';if(r==='student'){document.querySelectorAll('.page').forEach(x=>x.classList.remove('show'));$('#student-home').classList.add('show');$('#page-title').textContent='我的错题';$('#subtitle').textContent='老师录入并确认后的错题会显示在这里'}}
 function className(id){return data.classes.find(x=>x.id===id)?.name||'未分班'} function studentName(id){return data.students.find(x=>x.id===id)?.name||'未识别学生'}
 function localDate(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function lessonLabel(a){const p=[];if(a.date)p.push(a.date);if(a.period)p.push(`第${a.period}节`);p.push(className(a.classId));return p.join(' · ')}
 function fillSelect(selector,items,placeholder,fmt=x=>x.name){const el=$(selector);if(!el)return;const old=el.value;el.innerHTML=`<option value="">${placeholder}</option>`+items.map(x=>`<option value="${x.id}">${esc(fmt(x))}</option>`).join('');el.value=old}
 function render(){
- fillSelect('#student-class',data.classes,'请选择班级');fillSelect('#lesson-class',data.classes,'请选择班级');fillSelect('#analyze-lesson',[...data.assignments].reverse(),'请选择课次',x=>`${lessonLabel(x)} · ${x.title}`);fillSelect('#dashboard-class',data.classes,'全部班级');fillSelect('#mistake-assignment',data.assignments,'请选择课次',x=>`${x.title} · ${lessonLabel(x)}`);fillSelect('#mistake-student',data.students,'请选择学生',x=>`${x.name} · ${className(x.classId)}`);
+ fillSelect('#lesson-class',data.classes,'请选择班级');fillSelect('#analyze-lesson',[...data.assignments].reverse(),'请选择课次',x=>`${lessonLabel(x)} · ${x.title}`);fillSelect('#dashboard-class',data.classes,'全部班级');fillSelect('#mistake-assignment',data.assignments,'请选择课次',x=>`${x.title} · ${lessonLabel(x)}`);fillSelect('#mistake-student',data.students,'请选择学生',x=>`${x.name} · ${className(x.classId)}`);
  const aClass={};data.assignments.forEach(a=>aClass[a.id]=a.classId);const classOf=m=>aClass[m.assignmentId]||data.students.find(s=>s.id===m.studentId)?.classId||'';
  const mistakes=dashboardClass?data.mistakes.filter(m=>classOf(m)===dashboardClass):data.mistakes, students=dashboardClass?data.students.filter(s=>s.classId===dashboardClass):data.students;
  $('#class-count').textContent=data.classes.length;$('#student-count').textContent=students.length;$('#mistake-count').textContent=mistakes.length;$('#pending-count').textContent=mistakes.filter(x=>x.status==='pending'||x.errorType==='待老师确认').length;
@@ -21,7 +21,7 @@ function render(){
  const colors=['#5b4bda','#ee6eaa','#ff9d4d','#48b9ac','#7895e8'], max=Math.max(...Object.values(et),1),tc=$('#type-chart');tc.className='type-chart'+(!Object.keys(et).length?' empty':'');tc.innerHTML=Object.keys(et).length?Object.entries(et).sort((a,b)=>b[1]-a[1]).map(([k,v],i)=>`<div class="type-row"><span>${esc(k)}</span><div class="track"><div class="fill" style="width:${v/max*100}%;background:${colors[i%colors.length]}"></div></div><b>${v}</b></div>`).join(''):'暂时还没有错题数据';
  const freq=Object.values(mistakes.reduce((a,x)=>{const k=x.question||'未填写题目描述';(a[k]??={q:k,n:0,ids:[]}).n++;a[k].ids.push(x.studentId);return a},{})).sort((a,b)=>b.n-a.n).slice(0,5);$('#frequency-table').innerHTML=freq.length?`<div class="row-list">${freq.map(x=>`<div class="item"><div><b>${esc(x.q)}</b><div class="meta">涉及学生：${[...new Set(x.ids)].map(studentName).join('、')}</div></div><span class="tag">${x.n} 条记录</span></div>`).join('')}</div>`:'录入错题后，这里会展示最需要讲解的题目。';
  const todays=data.assignments.filter(a=>a.date===localDate()).sort((a,b)=>(+a.period||99)-(+b.period||99)),ts=$('#today-schedule');ts.className=todays.length?'':'table-empty';ts.innerHTML=todays.length?`<div class="row-list">${todays.map(a=>`<div class="item"><div><b>${a.period?`第${esc(a.period)}节`:'未指定节次'} · ${esc(className(a.classId))}</b><div class="meta">${esc(a.title)}${(a.knowledgePoints||[]).length?' · 知识点：'+esc(a.knowledgePoints.join('、')):''}</div></div></div>`).join('')}</div>`:'今天还没有上课记录，导入作业时选择今天的日期即可显示在这里。';
- $('#class-list').innerHTML=data.classes.length?`<div class="row-list">${data.classes.map(c=>{const ss=data.students.filter(s=>s.classId===c.id);return `<div class="item"><div><b>${esc(c.name)}</b><div class="meta">${esc(c.grade||'未填写年级')} · ${ss.length} 名学生${ss.length?'：'+ss.map(s=>esc(s.name)).join('、'):''}</div></div><button class="danger" onclick="del('classes','${c.id}')">删除</button></div>`}).join('')}</div>`:'请先创建一个班级。';
+ renderStudents();
  $('#assignment-list').innerHTML=data.assignments.length?`<div class="row-list">${[...data.assignments].reverse().map(a=>`<div class="item"><div><b>${esc(a.title)}</b><div class="meta">${esc(lessonLabel(a))}<br>${esc(a.content||'AI 未识别课堂摘要')}<br>知识点：${esc((a.knowledgePoints||[]).join('、')||'待确认')}</div></div></div>`).join('')}</div>`:'导入课堂报告后，每节课的记录会显示在这里。';
  const recent=[...data.mistakes].reverse().slice(0,8);$('#mistake-list').innerHTML=recent.length?`<div class="row-list">${recent.map(m=>`<div class="item"><div><b>${esc(m.question||'未填写题目')}</b><div class="meta">${esc(studentName(m.studentId))} · ${esc(m.knowledgePoint)} · ${esc(m.errorType)}${m.note?'<br>'+esc(m.note):''}</div></div><span class="tag ${m.status==='pending'?'pending':''}">${m.status==='pending'?'待确认':'已确认'}</span><button class="danger" onclick="del('mistakes','${m.id}')">删除</button></div>`).join('')}</div>`:'尚未录入错题。';
 }
@@ -70,10 +70,325 @@ function renderSettings(){
  $('#provider-list').querySelectorAll('.test-key').forEach(b=>b.onclick=async()=>{const pk=b.dataset.pk,msg=$(`#msg-${pk}`),model=groups[pk].models.find(m=>m.id===settings.model)?.id||groups[pk].models[0].id;try{b.disabled=true;b.textContent='测试中…';msg.textContent='';msg.className='test-msg';const r=await api('/api/models/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model,apiKey:$(`#key-${pk}`).value})});msg.textContent='✓ 连接成功，模型回复：'+r.reply;msg.classList.add('test-ok')}catch(e){msg.textContent='✗ '+e.message;msg.classList.add('test-fail')}finally{b.disabled=false;b.textContent='测试连接'}});
  const importBtn=$('#provider-list .import-cc');if(importBtn)importBtn.onclick=async()=>{try{const r=await api('/api/cc-switch/import',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await refresh();toast(`已从 CC Switch 导入小米 Key（${r.hint}）`)}catch(e){toast(e.message)}};
 }
+// ---------- V0.3 班级与学生 --------
+function renderStudents(){
+	renderClassCards();
+	const cls=data.classes.find(c=>c.id===selClassId);
+	if(!cls){$('#student-content').style.display='none';$('#student-placeholder').style.display='';return}
+	$('#student-placeholder').style.display='none';$('#student-content').style.display='';
+	renderStudentTable();
+	bindStudentEvents();
+}
+let stuEventsBound=false;
+function bindStudentEvents(){
+	if(stuEventsBound)return;stuEventsBound=true;
+	$('#stu-search').addEventListener('input',e=>{stuSearch=e.target.value.trim();renderStudentTable()});
+	$('#stu-status-filter').addEventListener('change',e=>{stuStatusFilter=e.target.value;renderStudentTable()});
+	$('#stu-show-archived').addEventListener('change',e=>{stuShowArchived=e.target.checked;renderStudentTable()});
+	$('#stu-new-btn').onclick=()=>startNewStudent();
+	$('#stu-inline-cancel').onclick=()=>{$('#stu-inline-form').style.display='none'};
+	$('#stu-inline-save').onclick=saveNewStudent;
+	$('#stu-export-btn').onclick=exportCSV;
+	$('#stu-import-btn').onclick=openImportModal;
+	$('#stu-detail-close').onclick=()=>$('#student-modal').classList.remove('show');
+	$('#stu-detail-edit').onclick=toggleStudentEdit;
+	$('#student-modal').addEventListener('click',e=>{if(e.target===e.currentTarget)$('#student-modal').classList.remove('show')});
+	$('#import-close').onclick=()=>$('#import-modal').classList.remove('show');
+	$('#import-modal').addEventListener('click',e=>{if(e.target===e.currentTarget)$('#import-modal').classList.remove('show')});
+}
+function renderClassCards(){
+	const cards=$('#class-cards');if(!cards)return;
+	cards.innerHTML=data.classes.length?data.classes.map(c=>{
+		const ss=data.students.filter(s=>s.classId===c.id);
+		const active=ss.filter(s=>s.status!=='archived').length;
+		const archived=ss.filter(s=>s.status==='archived').length;
+		const missingNo=ss.filter(s=>!s.studentNo).length;
+		const sel=c.id===selClassId?' selected':'';
+		const arc=c.archived?' archived':'';
+		return `<div class="class-card${sel}${arc}" data-cid="${c.id}">
+			<div class="cc-head"><b>${esc(c.name)}</b>${c.archived?'<span class="cc-archived-tag">已归档</span>':''}</div>
+			<div class="cc-stats"><span>在读 ${active} 人</span>${archived?'<span> · 归档 '+archived+' 人</span>':''}${missingNo?'<span class="cc-warn"> · 缺学号 '+missingNo+' 人</span>':''}</div>
+			<div class="cc-actions"><button class="cc-sel-btn">${sel?'✓ 已选':'选择'}</button><button class="cc-archive-btn">${c.archived?'取消归档':'归档'}</button><button class="cc-del-btn danger">删除</button></div>
+		</div>`}).join(''):'<div class="table-empty">还没有班级，在下方创建。</div>';
+	cards.querySelectorAll('.class-card').forEach(card=>{
+		const cid=card.dataset.cid;
+		card.querySelector('.cc-sel-btn').onclick=e=>{e.stopPropagation();selectClass(cid)};
+		card.querySelector('.cc-archive-btn').onclick=async e=>{e.stopPropagation();
+			const c=data.classes.find(x=>x.id===cid);if(!c)return;
+			try{await api(`/api/classes/${cid}/archive`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived:!c.archived})});await refresh();toast(c.archived?'已取消归档':'已归档')}catch(err){toast(err.message)}};
+		card.querySelector('.cc-del-btn').onclick=async e=>{e.stopPropagation();
+			if(!confirm('确定删除这个班级吗？'))return;
+			try{await api(`/api/classes/${cid}`,{method:'DELETE'});await refresh();toast('班级已删除')}catch(err){toast(err.message)}};
+	});
+}
+function selectClass(id){selClassId=id;renderStudents()}
+function renderStudentTable(){
+	const cls=data.classes.find(c=>c.id===selClassId);
+	if(!cls){$('#stu-tbody').innerHTML='';$('#stu-empty').style.display='';$('#stu-missing-warn').style.display='none';return}
+	let list=data.students.filter(s=>s.classId===selClassId);
+	if(stuSearch){const q=stuSearch.toLowerCase();list=list.filter(s=>(s.name||'').toLowerCase().includes(q)||(s.studentNo||'').toLowerCase().includes(q))}
+	if(stuStatusFilter)list=list.filter(s=>stuStatusFilter==='archived'?s.status==='archived':s.status!=='archived');
+	if(!stuShowArchived)list=list.filter(s=>s.status!=='archived');
+	const missingNo=list.filter(s=>!s.studentNo).length;
+	const warn=$('#stu-missing-warn');
+	if(missingNo){warn.style.display='';warn.innerHTML=`⚠ 本班有 <b>${missingNo}</b> 位学生缺少学号，建议补全后导出名单`}
+	else warn.style.display='none';
+	const tbody=$('#stu-tbody');
+	if(!list.length){$('#stu-empty').style.display='';$('#stu-table-wrap').style.display='none';tbody.innerHTML='';return}
+	$('#stu-empty').style.display='none';$('#stu-table-wrap').style.display='';
+	tbody.innerHTML=list.map(s=>{
+		const st=s.status==='archived'?'<span class="tag archived">已归档</span>':'<span class="tag active">在读</span>';
+		return `<tr class="${s.status==='archived'?'tr-archived':''}">
+			<td>${esc(s.studentNo||'—')}</td>
+			<td><a class="stu-name-link" data-sid="${s.id}">${esc(s.name)}</a></td>
+			<td>${st}</td>
+			<td class="stu-ops">
+				<button class="stu-detail-btn" data-sid="${s.id}">详情</button>
+				<button class="stu-edit-btn" data-sid="${s.id}">编辑</button>
+				<button class="stu-archive-btn" data-sid="${s.id}">${s.status==='archived'?'恢复':'归档'}</button>
+				<button class="stu-transfer-btn" data-sid="${s.id}">转班</button>
+			</td>
+		</tr>`}).join('');
+	tbody.querySelectorAll('.stu-name-link,.stu-detail-btn').forEach(b=>b.onclick=()=>openStudentDetail(b.dataset.sid));
+	tbody.querySelectorAll('.stu-edit-btn').forEach(b=>b.onclick=()=>editStudentInline(b.dataset.sid));
+	tbody.querySelectorAll('.stu-archive-btn').forEach(b=>b.onclick=()=>archiveStudent(b.dataset.sid));
+	tbody.querySelectorAll('.stu-transfer-btn').forEach(b=>b.onclick=()=>transferStudent(b.dataset.sid));
+}
+function startNewStudent(){$('#stu-inline-form').style.display='flex';$('#stu-inline-name').value='';$('#stu-inline-no').value='';$('#stu-inline-gender').value='';$('#stu-inline-year').value='';$('#stu-inline-phone').value='';$('#stu-inline-name').focus()}
+async function saveNewStudent(){
+	const name=$('#stu-inline-name').value.trim();if(!name){toast('请输入姓名');return}
+	const body={name,classId:selClassId};
+	const no=$('#stu-inline-no').value.trim();if(no)body.studentNo=no;
+	const g=$('#stu-inline-gender').value;if(g)body.gender=g;
+	const y=$('#stu-inline-year').value.trim();if(y)body.enrollmentYear=y;
+	const p=$('#stu-inline-phone').value.trim();if(p)body.phone=p;
+	try{await api('/api/students',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('#stu-inline-form').style.display='none';await refresh();toast('学生已添加')}catch(e){toast(e.message)}
+}
+let stuDetailId=null, stuEditing=false;
+async function openStudentDetail(id){
+	stuDetailId=id;stuEditing=false;
+	try{const r=await api(`/api/students/${id}`);renderStudentDetail(r);$('#student-modal').classList.add('show')}catch(e){toast(e.message)}
+}
+function renderStudentDetail(d){
+	const s=d.student,a=d.attendance||{},sub=d.submissions||{},mis=d.mistakes||{},perfs=d.performances||[],lessons=d.lessons||[],fbs=d.feedbacks||[],hist=d.history||[];
+	$('#stu-detail-title').textContent=s.name+' · 详情';
+	$('#stu-detail-edit').textContent='编辑';$('#stu-detail-edit').style.display='';
+	const statusTag=s.status==='archived'?'<span class="tag archived">已归档</span>':'<span class="tag active">在读</span>';
+	let html=`<div class="stu-detail-grid">
+		<div class="stu-detail-section"><h3>基本信息</h3>
+			<div class="stu-info-rows" id="stu-info-rows">
+				<div class="stu-info-row"><span>姓名</span><span id="stu-info-name">${esc(s.name)}</span></div>
+				<div class="stu-info-row"><span>学号</span><span id="stu-info-no">${esc(s.studentNo||'—')}</span></div>
+				<div class="stu-info-row"><span>性别</span><span id="stu-info-gender">${esc(s.gender||'—')}</span></div>
+				<div class="stu-info-row"><span>班级</span><span id="stu-info-class">${esc(s.className||className(s.classId))}</span></div>
+				<div class="stu-info-row"><span>状态</span><span id="stu-info-status">${statusTag}</span></div>
+				<div class="stu-info-row"><span>入学年份</span><span id="stu-info-year">${esc(s.enrollmentYear||'—')}</span></div>
+				<div class="stu-info-row"><span>联系方式</span><span id="stu-info-phone">${esc(s.phone||'—')}</span></div>
+				<div class="stu-info-row"><span>备注</span><span id="stu-info-note">${esc(s.note||'—')}</span></div>
+			</div>
+		</div>
+		<div class="stu-detail-section"><h3>统计</h3>
+			<div class="stu-stats-cards">
+				<div class="stu-stat"><b>${a.total||0}</b><span>考勤总次数</span></div>
+				<div class="stu-stat"><b>${a.present||0}</b><span>已到</span></div>
+				<div class="stu-stat"><b>${a.late||0}</b><span>迟到</span></div>
+				<div class="stu-stat"><b>${(a.leave||0)+(a.absent||0)}</b><span>请假/缺勤</span></div>
+				<div class="stu-stat"><b>${sub.total||0}</b><span>作业总次数</span></div>
+				<div class="stu-stat"><b>${sub.withImages||0}</b><span>已交作业</span></div>
+				<div class="stu-stat"><b>${mis.confirmed||0}</b><span>已确认错题</span></div>
+				<div class="stu-stat"><b>${mis.pending||0}</b><span>待确认错题</span></div>
+			</div>
+		</div>`;
+	if(perfs.length)html+=`<div class="stu-detail-section"><h3>最近课堂表现</h3><div class="stu-perf-list">${perfs.slice(0,5).map(p=>`<div class="stu-perf-item"><b>${esc(p.lessonLabel||'')}</b>${(p.tags||[]).map(t=>`<span class="stu-tag">${esc(t)}</span>`).join('')}${p.note?`<span class="stu-perf-note">${esc(p.note)}</span>`:''}</div>`).join('')}</div></div>`;
+	if(lessons.length)html+=`<div class="stu-detail-section"><h3>最近课次</h3><div class="stu-lesson-list">${lessons.slice(0,5).map(l=>`<div class="stu-lesson-item"><span>${esc(l.date||'')} 第${esc(l.period||'?')}节</span><span>${esc(l.title||'')}</span><span class="ws-badge st-${l.status||''}">${esc(l.statusName||l.status)}</span></div>`).join('')}</div></div>`;
+	if(fbs.length)html+=`<div class="stu-detail-section"><h3>已生成反馈文件</h3><div class="stu-fb-list">${fbs.map(f=>`<div class="stu-fb-item"><span>📄 ${esc(f)}</span><a class="dl-btn" href="agent输出/${encodeURI(f)}" download="${esc(f)}">下载</a></div>`).join('')}</div></div>`;
+	if(hist.length)html+=`<div class="stu-detail-section"><h3>操作历史</h3><div class="stu-hist-list">${hist.slice(0,10).map(h=>`<div class="stu-hist-item"><span>${esc(h.action||'')}</span><span class="muted">${esc(h.time||'')}</span></div>`).join('')}</div></div>`;
+	html+='</div>';
+	$('#stu-detail-body').innerHTML=html;
+}
+function toggleStudentEdit(){
+	if(!stuDetailId)return;
+	stuEditing=!stuEditing;
+	if(stuEditing){renderStudentEditForm()}else{saveStudentEdit(stuDetailId)}
+}
+function renderStudentEditForm(){
+	const rows=$('#stu-info-rows');if(!rows)return;
+	const nameEl=$('#stu-info-name'),noEl=$('#stu-info-no'),genderEl=$('#stu-info-gender'),yearEl=$('#stu-info-year'),phoneEl=$('#stu-info-phone'),noteEl=$('#stu-info-note');
+	const name=nameEl.textContent,no=noEl.textContent==='—'?'':noEl.textContent,gender=genderEl.textContent==='—'?'':genderEl.textContent,year=yearEl.textContent==='—'?'':yearEl.textContent,phone=phoneEl.textContent==='—'?'':phoneEl.textContent,note=noteEl.textContent==='—'?'':noteEl.textContent;
+	nameEl.innerHTML=`<input id="stu-edit-name" value="${esc(name)}">`;
+	noEl.innerHTML=`<input id="stu-edit-no" value="${esc(no)}" placeholder="学号">`;
+	genderEl.innerHTML=`<select id="stu-edit-gender"><option value="">—</option><option value="男"${gender==='男'?' selected':''}>男</option><option value="女"${gender==='女'?' selected':''}>女</option></select>`;
+	yearEl.innerHTML=`<input id="stu-edit-year" value="${esc(year)}" placeholder="入学年份">`;
+	phoneEl.innerHTML=`<input id="stu-edit-phone" value="${esc(phone)}" placeholder="联系方式">`;
+	noteEl.innerHTML=`<input id="stu-edit-note" value="${esc(note)}" placeholder="备注">`;
+	$('#stu-detail-edit').textContent='保存';
+}
+async function saveStudentEdit(id){
+	const body={};
+	const n=$('#stu-edit-name');if(n)body.name=n.value.trim();
+	const no=$('#stu-edit-no');if(no)body.studentNo=no.value.trim();
+	const g=$('#stu-edit-gender');if(g)body.gender=g.value;
+	const y=$('#stu-edit-year');if(y)body.enrollmentYear=y.value.trim();
+	const p=$('#stu-edit-phone');if(p)body.phone=p.value.trim();
+	const nt=$('#stu-edit-note');if(nt)body.note=nt.value.trim();
+	try{await api(`/api/students/${id}/update`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});stuEditing=false;await refresh();openStudentDetail(id);toast('已保存')}catch(e){toast(e.message)}
+}
+function editStudentInline(id){
+	const s=data.students.find(x=>x.id===id);if(!s)return;
+	const name=prompt('姓名',s.name);if(name===null)return;
+	const no=prompt('学号',s.studentNo||'');if(no===null)return;
+	const g=prompt('性别（男/女）',s.gender||'');if(g===null)return;
+	const body={name:name.trim()};if(no.trim())body.studentNo=no.trim();
+	if(g.trim())body.gender=g.trim();
+	api(`/api/students/${id}/update`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(()=>{refresh();toast('已保存')}).catch(e=>toast(e.message));
+}
+async function archiveStudent(id){
+	const s=data.students.find(x=>x.id===id);if(!s)return;
+	const arc=s.status==='archived';
+	if(!arc&&!confirm('归档后将不在课次名单中默认显示，确定？'))return;
+	try{await api(`/api/students/${id}/${arc?'restore':'archive'}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await refresh();toast(arc?'已恢复':'已归档')}catch(e){toast(e.message)}
+}
+async function transferStudent(id){
+	const s=data.students.find(x=>x.id===id);if(!s)return;
+	const opts=data.classes.filter(c=>c.id!==s.classId).map(c=>c.name).join('、');
+	if(!opts){toast('没有其他班级可转');return}
+	const target=prompt(`将「${s.name}」转去哪个班级？\n可选：${opts}`,'');
+	if(!target)return;
+	const cls=data.classes.find(c=>c.name===target.trim()||c.id===target.trim());
+	if(!cls){toast('未找到该班级');return}
+	const reason=prompt('转班原因（可选）','');
+	try{await api(`/api/students/${id}/transfer`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({toClassId:cls.id,reason:reason||''})});await refresh();toast('已转班')}catch(e){toast(e.message)}
+}
+async function exportCSV(){
+	if(!selClassId){toast('请先选择班级');return}
+	try{const r=await fetch(`/api/students/export.csv?classId=${selClassId}`,{headers:token?{Authorization:`Bearer ${token}`}:{}});if(!r.ok)throw Error('导出失败');const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`students_${selClassId}.csv`;a.click();URL.revokeObjectURL(a.href);toast('CSV 已下载')}catch(e){toast(e.message)}
+}
+// ---------- 批量导入 ----------
+let importRows=[], importClassId='';
+async function openImportModal(){
+	importRows=[];importClassId=selClassId||'';
+	renderImportForm();$('#import-modal').classList.add('show')
+}
+function renderImportForm(){
+	$('#import-body').innerHTML=`<div class="import-step">
+		<label>目标班级<select id="import-class">${data.classes.map(c=>`<option value="${c.id}"${c.id===importClassId?' selected':''}>${esc(c.name)}</option>`).join('')}</select></label>
+		<div class="import-methods"><button class="import-method-tab active" data-m="text">粘贴文本</button><button class="import-method-tab" data-m="file">选择文件</button></div>
+		<div id="import-text-area"><textarea id="import-text" rows="6" placeholder="每行一个学生，格式：学号,姓名,性别,入学年份,备注&#10;或只写姓名，一行一个&#10;例如：&#10;2024001,张小明,男,2024&#10;李小萌"></textarea></div>
+		<div id="import-file-area" style="display:none"><input type="file" id="import-file-input" accept=".csv,.xlsx,.xls"></div>
+		<div class="import-actions"><button class="primary" id="import-preview-btn">预览</button></div>
+	</div><div id="import-result"></div>`;
+	$('#import-body').querySelectorAll('.import-method-tab').forEach(t=>t.onclick=()=>{
+		$('#import-body').querySelectorAll('.import-method-tab').forEach(x=>x.classList.remove('active'));t.classList.add('active');
+		$('#import-text-area').style.display=t.dataset.m==='text'?'':'none';
+		$('#import-file-area').style.display=t.dataset.m==='file'?'':'none';
+	});
+	$('#import-preview-btn').onclick=doImportPreview;
+}
+async function doImportPreview(){
+	const btn=$('#import-preview-btn');btn.disabled=true;btn.textContent='预览中…';
+	const classId=$('#import-class').value;
+	if(!classId){toast('请选择班级');btn.disabled=false;btn.textContent='预览';return}
+	try{
+		const m=document.querySelector('#import-body .import-method-tab.active')?.dataset.m;
+		let body={classId};
+		if(m==='file'){
+			const f=$('#import-file-input').files[0];if(!f){toast('请选择文件');btn.disabled=false;btn.textContent='预览';return}
+			if(f.size>5*1024*1024){toast('文件超过5MB');btn.disabled=false;btn.textContent='预览';return}
+			const src=await new Promise((ok,no)=>{const r=new FileReader;r.onload=()=>ok(r.result);r.onerror=no;r.readAsDataURL(f)});
+			const up=await api('/api/upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:src})});
+			body.path=up.path;
+		}else{
+			const text=$('#import-text').value.trim();if(!text){toast('请粘贴学生名单');btn.disabled=false;btn.textContent='预览';return}
+			body.text=text;
+		}
+		const r=await api('/api/students/import-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+		importRows=r.rows||[];importClassId=classId;renderImportResult(r);
+	}catch(e){toast(e.message)}finally{btn.disabled=false;btn.textContent='预览'}
+}
+function renderImportResult(r){
+	const rows=r.rows||[];
+	let _new=0,conflict=0,duplicate=0,error=0;
+	rows.forEach(row=>{const s=row.status||'new';if(s==='new'||s==='_new')_new++;else if(s==='conflict')conflict++;else if(s==='duplicate')duplicate++;else if(s==='error')error++});
+	let html=`<div class="import-summary"><span>新增 <b>${_new}</b></span><span>冲突 <b>${conflict}</b></span><span>重复 <b>${duplicate}</b></span><span>格式错误 <b>${error}</b></span></div>`;
+	html+='<div class="stu-table-wrap"><table class="stu-table"><thead><tr><th style="width:40px"></th><th>学号</th><th>姓名</th><th>性别</th><th>入学年份</th><th>备注</th><th>状态</th><th>原因</th></tr></thead><tbody>';
+	html+=rows.map((row,i)=>{
+		const s=row.status||'new',sc=s==='new'||s==='_new'?'new':s;
+		const cb=s==='conflict'?`<input type="checkbox" class="import-cb" data-i="${i}">`:'';
+		return `<tr class="tr-import-${sc}"><td>${cb}</td><td>${esc(row.studentNo||'')}</td><td>${esc(row.name||'')}</td><td>${esc(row.gender||'')}</td><td>${esc(row.enrollmentYear||'')}</td><td>${esc(row.note||'')}</td><td><span class="tag import-${sc}">${s}</span></td><td class="muted">${esc(row.reason||'')}</td></tr>`;
+	}).join('')+'</tbody></table></div>';
+	html+=`<div class="import-actions"><button class="primary" id="import-confirm-btn">确认导入</button><button id="import-cancel-btn">取消</button></div>`;
+	$('#import-result').innerHTML=html;
+	$('#import-confirm-btn').onclick=confirmImport;
+	$('#import-cancel-btn').onclick=()=>{$('#import-result').innerHTML='';importRows=[];renderImportForm()};
+}
+async function confirmImport(){
+	const rows=importRows.filter((r,i)=>{
+		if(r.status==='new'||r.status==='_new')return true;
+		if(r.status==='conflict'){
+			const cb=document.querySelector(`.import-cb[data-i="${i}"]`);
+			return cb&&cb.checked;
+		}
+		return false;
+	});
+	if(!rows.length){toast('没有可导入的数据');return}
+	const btn=$('#import-confirm-btn');btn.disabled=true;btn.textContent='导入中…';
+	try{const r=await api('/api/students/import-confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({classId:importClassId,rows})});await refresh();$('#import-modal').classList.remove('show');toast(`导入完成：新增 ${r.created||0} 人，更新 ${r.updated||0} 人`)}catch(e){toast(e.message)}finally{btn.disabled=false;btn.textContent='确认导入'}
+}
+// ---------- 账号管理增强 ----------
+async function loadPublicStudents(){
+	try{const r=await api('/api/auth/students');
+		const fill=sel=>{if(!sel)return;const v=sel.value;sel.innerHTML='<option value="">不绑定（创建后绑定）</option>'+r.students.map(s=>`<option value="${s.id}">${esc(s.name)}（${esc(s.className||'')}）</option>`).join('');sel.value=v};
+		fill($('#account-student-sel'));fill($('#account-student-sel-unique'));
+	}catch(e){}
+}
+async function loadAccounts(){
+	await loadPublicStudents();
+	const r=await api('/api/users');
+	$('#account-list').innerHTML=r.users.length?`<div class="row-list">${r.users.map(u=>{
+		const bound=u.boundStudentName?`<span class="tag bound">已绑定：${esc(u.boundStudentName)}</span>`:(u.studentId?'<span class="tag unbound">待绑定</span>':'');
+		const bindBtn=(u.studentId&&!u.boundStudentName)?`<button class="stu-bind-btn" data-uid="${u.id}">绑定</button>`:(u.role==='student'&&!u.studentId?`<button class="stu-bind-btn" data-uid="${u.id}">绑定学生</button>`:'');
+		return `<div class="item"><div><b>${esc(u.realName||u.username)}</b><div class="meta">${esc(u.username)} · ${ROLE_NAMES[u.role]||esc(u.role)}${bound}${u.lastLoginAt?' · 最近登录 '+esc(u.lastLoginAt):''}</div></div>${u.username==='root'?'<span class="tag">内置管理员</span>':`${bindBtn}<button onclick="resetPwd('${u.id}')">重置密码</button><button class="danger" onclick="delUser('${u.id}')">删除</button>`}</div>`}).join('')}</div>`:'暂无账号。';
+	$('#account-list').querySelectorAll('.stu-bind-btn').forEach(b=>b.onclick=async()=>{
+		const uid=b.dataset.uid;
+		try{const r=await api('/api/auth/students');showBindPopup(uid,b,r.students)}catch(e){toast('加载学生列表失败')}
+	});
+}
+function showBindPopup(uid,anchor,students){
+	const existed=document.querySelector('.bind-popup');if(existed)existed.remove();
+	const pop=document.createElement('div');pop.className='bind-popup';
+	pop.innerHTML=`<select class="bind-sel"><option value="">选择学生…</option>${students.map(s=>`<option value="${s.id}">${esc(s.name)}（${esc(s.className||'')}）</option>`).join('')}</select><button class="bind-ok primary">确定</button><button class="bind-cancel">取消</button>`;
+	document.body.appendChild(pop);
+	const rect=anchor.getBoundingClientRect();
+	pop.style.top=(rect.bottom+4)+'px';pop.style.left=rect.left+'px';
+	pop.querySelector('.bind-ok').onclick=async()=>{
+		const sid=pop.querySelector('.bind-sel').value;if(!sid){toast('请选择学生');return}
+		try{await api(`/api/users/${uid}/bind`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({studentId:sid})});await loadAccounts();toast('已绑定')}catch(e){toast(e.message)}finally{pop.remove()}
+	};
+	pop.querySelector('.bind-cancel').onclick=()=>pop.remove();
+	const close=e=>{if(!pop.contains(e.target)&&e.target!==anchor){pop.remove();document.removeEventListener('click',close)}};
+	setTimeout(()=>document.addEventListener('click',close),0);
+}
+// ---------- 备份 ----------
+async function backupDownload(){
+	try{const r=await fetch('/api/backup',{headers:token?{Authorization:`Bearer ${token}`}:{}});if(!r.ok)throw Error('下载失败');const blob=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='backup.zip';a.click();URL.revokeObjectURL(a.href);toast('备份已下载')}catch(e){toast(e.message)}
+}
+async function backupRestore(file){
+	if(!confirm('恢复备份将覆盖当前全部数据（班级、学生、课次、错题等）。确定继续？'))return;
+	if(!confirm('二次确认：恢复后建议刷新页面以确保数据同步。继续？'))return;
+	try{const src=await new Promise((ok,no)=>{const r=new FileReader;r.onload=()=>ok(r.result);r.onerror=no;r.readAsDataURL(file)});
+		await api('/api/backup/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:src,confirm:true})});
+		toast('备份已恢复，请刷新页面');setTimeout(()=>location.reload(),2000)}catch(e){toast(e.message)}
+}
+function bindBackupEvents(){
+	$('#backup-download').onclick=backupDownload;
+	$('#backup-restore-btn').onclick=()=>$('#backup-file').click();
+	$('#backup-file').addEventListener('change',e=>{const f=e.target.files[0];if(f){backupRestore(f);e.target.value=''}});
+}
+bindBackupEvents();
 async function refresh(){if(currentUser?.role==='student'){data=await api('/api/data');renderStudent();return}[data,settings]=await Promise.all([api('/api/data'),api('/api/settings')]);render();renderSettings();renderSeats();renderAgent();loadAgents();loadHome();if(currentUser?.role==='admin')loadAccounts()} async function del(type,id){if(confirm('确定删除这条记录吗？')){await api(`/api/${type}/${id}`,{method:'DELETE'});await refresh();toast('已删除')}}window.del=del;
 function form(id,url,mapper){const f=$(id);if(!f)return;f.addEventListener('submit',async e=>{e.preventDefault();try{const obj=Object.fromEntries(new FormData(f));await api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(mapper?mapper(obj):obj)});f.reset();await refresh();toast('保存成功')}catch(err){toast(err.message)}})}
-form('#class-form','/api/classes',x=>({...x,createdAt:new Date().toISOString()}));form('#student-form','/api/students');
-$('#account-form').addEventListener('submit',async e=>{e.preventDefault();try{const obj=Object.fromEntries(new FormData(e.target));await api('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});e.target.reset();await loadAccounts();toast('账号已创建')}catch(err){toast(err.message)}});
+form('#class-form','/api/classes',x=>({...x,createdAt:new Date().toISOString()}));
+$('#account-form').addEventListener('submit',async e=>{e.preventDefault();try{const obj=Object.fromEntries(new FormData(e.target));if(!obj.studentId)delete obj.studentId;await api('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});e.target.reset();await loadAccounts();toast('账号已创建')}catch(err){toast(err.message)}});
 $('#mistake-form').addEventListener('submit',async e=>{e.preventDefault();try{const obj=Object.fromEntries(new FormData(e.target));await api('/api/mistakes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});e.target.reset();await refresh();toast('错题已保存')}catch(err){toast(err.message)}});
 async function uploadFiles(list){const paths=[];for(const f of [...list]){if(f.size>5*1024*1024)throw Error(`${f.name} 超过 5MB`);const src=await new Promise((ok,no)=>{const r=new FileReader;r.onload=()=>ok(r.result);r.onerror=no;r.readAsDataURL(f)});paths.push((await api('/api/upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:src})})).path)}return paths}
 $('#lesson-form').addEventListener('submit',async e=>{e.preventDefault();const btn=$('#lesson-btn');const classId=$('#lesson-class').value,date=$('#lesson-date').value,period=$('#lesson-period').value;try{const report=await uploadFiles($('#report-files').files),title=$('#lesson-title').value.trim();if(!report.length&&!title)throw Error('请上传课堂内容报告，或手动填写课程名称');btn.disabled=true;btn.textContent='保存中…';const lesson=await api('/api/lessons',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({classId,date,period,reportImages:report,title})});e.target.reset();$('#lesson-date').value=localDate();await refresh();$('#analyze-lesson').value=lesson.id;toast(`课程已保存：${lesson.title}`)}catch(err){if(err.conflict){const x=err.conflict.existing||{};toast(`${x.date||'当天'}第${x.period||'?'}节已有课，同一时间段不能再开课`)}else{toast(err.message)}}finally{btn.disabled=false;btn.textContent='① 保存本节课'}});
@@ -84,6 +399,7 @@ $('#seat-layout-btn').onclick=async()=>{if(!seatClass){toast('请先选择班级
 $('#seat-student').addEventListener('change',async()=>{if(!selSeat)return;try{await api('/api/seats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({classId:seatClass,row:selSeat.r,col:selSeat.c,studentId:$('#seat-student').value})});await refresh();toast('座位已更新')}catch(e){toast(e.message)}});
 $('#seat-save').onclick=async()=>{if(!selSeat)return;const body={classId:seatClass,assignmentId:seatLesson,row:selSeat.r,col:selSeat.c,studentId:$('#seat-student').value,tags:[...$('#seat-tags').querySelectorAll('button.active')].map(b=>b.dataset.tag),note:$('#seat-note').value,workNote:$('#seat-work-note').value};if(seatDraftImage==='__clear__')body.clearImage=true;else if(seatDraftImage)body.image=seatDraftImage;try{await api('/api/performances',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});seatDraftImage='';await refresh();toast('课堂记录已保存')}catch(e){toast(e.message)}};
 $('#seat-browse').onclick=()=>$('#paste-file').click();
+iaBindPage();
 $('#paste-file').addEventListener('change',()=>{const f=$('#paste-file').files[0];if(f){uploadSeatImage(f);$('#paste-file').value=''}});
 $('#seat-work-note').addEventListener('paste',e=>{const f=[...(e.clipboardData?.files||[])].find(x=>x.type.startsWith('image/'));if(f){e.preventDefault();uploadSeatImage(f)}});
 let agentList=[], agentCur='通用', agentChats={};
@@ -135,13 +451,13 @@ $('#tab-register').onclick=()=>{$('#tab-register').classList.add('active');$('#t
 $('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{const obj=Object.fromEntries(new FormData(e.target));const r=await api('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});setSession(r.token,r.user);e.target.reset();hideAuth();await refresh();toast(`欢迎回来，${r.user.realName||r.user.username}`)}catch(err){toast(err.message)}});
 $('#register-form').addEventListener('submit',async e=>{e.preventDefault();try{const obj=Object.fromEntries(new FormData(e.target));if(obj.password!==obj.confirm)throw Error('两次输入的密码不一致');if(obj.role==='student'&&!obj.realName.trim())throw Error('学生注册需填写与班级名单一致的姓名');const r=await api('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:obj.username,realName:obj.realName,password:obj.password,role:obj.role})});setSession(r.token,r.user);e.target.reset();hideAuth();await refresh();toast('注册成功，已自动登录')}catch(err){toast(err.message)}});
 $('#logout-btn').onclick=()=>{token='';localStorage.removeItem('token');location.reload()};
-document.querySelectorAll('.nav').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.page').forEach(x=>x.classList.remove('show'));$('#'+b.dataset.page).classList.add('show');const n={home:['课次','围绕一节课完成全部教学工作'],workspace:['课次工作台','考勤—课堂记录—作业—分析—确认—学情'],dashboard:['班级学习总览','快速掌握全班的共性薄弱点'],import:['导入作业（旧入口）','新流程：在课次工作台②课后作业中按学生上传'],seats:['课堂座位（旧入口）','新流程：在课次工作台①课堂记录中直接使用座位图'],agent:['总结 Agent（旧入口）','新流程：在课次工作台⑤学生反馈中逐生生成'],classes:['班级与学生','创建班级；学生姓名也可由 AI 从作业中自动识别'],mistakes:['人工补充（旧入口）','新流程：在课次工作台③待确认底部补充'],settings:['设置','选择国内模型并配置本机 API Key']};$('#page-title').textContent=n[b.dataset.page][0];$('#subtitle').textContent=n[b.dataset.page][1]}));$('#dashboard-class').addEventListener('change',e=>{dashboardClass=e.target.value;render()});$('#lesson-date').value=localDate();
+document.querySelectorAll('.nav').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.page').forEach(x=>x.classList.remove('show'));$('#'+b.dataset.page).classList.add('show');const n={home:['课次','围绕一节课完成全部教学工作'],workspace:['课次工作台','考勤—课堂记录—作业—分析—确认—学情'],dashboard:['班级学习总览','快速掌握全班的共性薄弱点'],'import-agent':['作业导入 Agent','把试卷、成绩单或平台链接交给 AI 自动整理错题'],import:['导入作业','新流程：在课次工作台②课后作业中按学生上传'],seats:['课堂座位','新流程：在课次工作台①课堂记录中直接使用座位图'],agent:['总结 Agent','新流程：在课次工作台⑤学生反馈中逐生生成'],classes:['班级与学生','创建班级；管理学生档案、学号与状态'],mistakes:['人工补充','新流程：在课次工作台③待确认底部补充'],settings:['设置','选择国内模型并配置本机 API Key']};$('#page-title').textContent=n[b.dataset.page][0];$('#subtitle').textContent=n[b.dataset.page][1];if(b.dataset.page==='import-agent')iaEnter()}));$('#dashboard-class').addEventListener('change',e=>{dashboardClass=e.target.value;render()});$('#lesson-date').value=localDate();
 
 // ---------- V0.2 课次首页与工作台 ----------
 const LESSON_STATUS={'in_class':'上课中','waiting_homework':'等待作业','analyzing':'作业分析中','pending_review':'待确认','completed':'已完成'};
 const ATT_STATUS={'present':'已到','late':'迟到','leave':'请假','absent':'缺勤','early_leave':'早退'};
 const SUB_STATUS={'not_submitted':'未收取','submitted':'已收取','uploaded':'已上传','analyzing':'分析中','pending_review':'待确认','completed':'已完成','not_required':'无需提交'};
-let ws=null, wsTab='record';
+let ws=null, wsTab='record', hwContinuous=false;
 function gotoPage(id){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));const b=document.querySelector(`.nav[data-page="${id}"]`);if(b)b.classList.add('active');document.querySelectorAll('.page').forEach(x=>x.classList.remove('show'));$('#'+id).classList.add('show')}
 
 async function loadHome(){
@@ -272,10 +588,11 @@ function renderWsHomework(){
  const ordered=[...ws.students].sort((a,b)=>rank(a)-rank(b));
  const rows=ordered.map(s=>{const sub=subs[s.id];const st=sub?sub.status:'not_submitted';const imgs=sub?sub.images.length:0;const absent=attMap[s.id]==='absent'||attMap[s.id]==='leave';
   return `<div class="hw-row${absent?' hw-off':''}" data-sid="${s.id}"><span class="att-name">${esc(s.name)}</span><span class="ws-badge sub-${st}">${absent?'缺勤/请假':SUB_STATUS[st]||st}</span><span class="muted hw-imgs" ${imgs?`title="点击查看作业图"`:''}>${imgs?imgs+' 张图':''}</span><input type="file" accept="image/*" multiple class="hw-files"><button class="hw-upload">上传</button><button class="hw-paste" title="也可直接在输入框 Ctrl+V 粘贴截图">粘贴</button><button class="hw-analyze" ${imgs?'':'disabled'}>AI 分析</button><span class="hw-msg"></span></div>`}).join('');
- $('#ws-body').innerHTML=`<section class="panel"><div class="hw-toolbar"><h2>课后作业</h2><label class="muted"><input type="checkbox" id="hw-continuous"> 连续录入（上传后跳下一位）</label><button class="primary" id="hw-analyze-all">✦ 分析本课次全部待分析作业</button></div><p class="privacy">先选学生再传图；可一次多张、可分批追加，也可在“选择图片”框里 Ctrl+V 直接粘贴截图。AI 只分析图片内容，不识别姓名、不改变归属。未交作业的排在最前。</p><div class="hw-list">${rows}</div></section>`;
+ $('#ws-body').innerHTML=`<section class="panel"><div class="hw-toolbar"><h2>课后作业</h2><label class="muted"><input type="checkbox" id="hw-continuous"${hwContinuous?' checked':''}> 连续录入（上传后跳下一位）</label><button class="primary" id="hw-analyze-all">✦ 分析本课次全部待分析作业</button></div><p class="privacy">先选学生再传图；可一次多张、可分批追加，也可在“选择图片”框里 Ctrl+V 直接粘贴截图。AI 只分析图片内容，不识别姓名、不改变归属。未交作业的排在最前。也可以到左侧「作业导入 Agent」把试卷、成绩单或平台链接交给 AI 自动整理。</p><div class="hw-list">${rows}</div></section>`;
  $('#hw-analyze-all').onclick=async()=>{const b=$('#hw-analyze-all');b.disabled=true;b.textContent='分析中…';try{const r=await api(`/api/lessons/${ws.lesson.id}/analyze`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await reloadWs();toast(`分析完成 ${r.analyzed} 人${r.pending?`，${r.pending} 项待确认`:''}${r.failed.length?`，失败 ${r.failed.length} 人：${r.failed.map(f=>f.student).join('、')}`:''}`)}catch(e){toast(e.message);await reloadWs()}finally{b.disabled=false;b.textContent='✦ 分析本课次全部待分析作业'}};
+ $('#hw-continuous').onchange=e=>hwContinuous=e.target.checked;
  $('#ws-body').querySelectorAll('.hw-row').forEach(row=>{
-  const sid=row.dataset.sid,sub=subs[s.id],msg=row.querySelector('.hw-msg');
+  const sid=row.dataset.sid,sub=subs[sid],msg=row.querySelector('.hw-msg');
   const doUpload=async(files)=>{
    if(!files.length){toast('请先选择或粘贴图片');return}
    try{
@@ -291,12 +608,49 @@ function renderWsHomework(){
   row.querySelector('.hw-upload').onclick=()=>doUpload([...row.querySelector('.hw-files').files]);
   row.querySelector('.hw-paste').onclick=async()=>{try{const items=await navigator.clipboard.read();const files=[];for(const it of items){for(const t of it.types){if(t.startsWith('image/'))files.push(await it.getType(t))}}if(!files.length){toast('剪贴板里没有图片，可先截图再点粘贴');return}doUpload(files)}catch(e){toast('无法读取剪贴板，请改用“选择图片”或在文件框里 Ctrl+V')}};
   row.querySelector('.hw-files').addEventListener('paste',e=>{const f=[...(e.clipboardData?.files||[])].filter(x=>x.type.startsWith('image/'));if(f.length){e.preventDefault();doUpload(f)}});
-  row.querySelector('.hw-imgs').onclick=()=>{if(sub&&sub.images.length)openImgGallery(sub.images,`${esc(s.name)} 的作业`)};
+  row.querySelector('.hw-imgs').onclick=()=>{if(sub&&sub.images.length)openImgGallery(sub.images,`${esc((ws.students.find(x=>x.id===sid)||{}).name||'?')} 的作业`)};
   row.querySelector('.hw-analyze').onclick=async()=>{
    if(!sub)return;const b=row.querySelector('.hw-analyze');b.disabled=true;b.textContent='分析中…';msg.textContent='AI 分析中…';
    try{const r=await api(`/api/submissions/${sub.id}/analyze`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await reloadWs();toast(`分析完成：${r.mistakes.length} 条错题${r.pending?`，${r.pending} 项待确认`:''}`)}catch(e){msg.textContent='分析失败，可重试';b.disabled=false;b.textContent='重试分析';toast(e.message);await reloadWs()}
   };
  });
+}
+// ✦ 作业导入 Agent（独立纯会话页，Kimi 式单栏聊天；状态存模块级变量）
+let iaSid='',iaEvents=[],iaDrafts=[],iaStatus='idle',iaFiles=[],iaTimer=null;
+function iaStopPoll(){if(iaTimer){clearInterval(iaTimer);iaTimer=null}}
+function iaClear(){iaStopPoll();iaSid='';iaEvents=[];iaDrafts=[];iaStatus='idle';iaFiles=[]}
+let iaEnsuring=null;
+async function iaEnsure(){if(iaSid)return iaSid;if(iaEnsuring)return iaEnsuring;iaEnsuring=api('/api/import-agent/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lessonId:'',source:''})}).then(r=>{iaSid=r.sessionId;return iaSid}).finally(()=>iaEnsuring=null);return iaEnsuring}
+function iaEventNode(ev){const d=document.createElement('div');if(ev.kind==='user'){d.className='msg user';d.textContent=ev.text}else if(ev.kind==='message'){d.className='msg bot';d.textContent=ev.text}else if(ev.kind==='error'){d.className='ia-err';d.textContent=ev.text}else if(ev.kind==='tool'){d.className='ia-line';d.textContent=`🔧 ${ev.tool||''} ${ev.text||''}`.trim()}else{d.className='ia-line';d.textContent='→ '+(ev.text||'')}return d}
+function iaRenderChat(){const box=$('#ia-chat');if(!box)return;box.innerHTML='';if(!iaEvents.length){box.innerHTML='<div class="msg bot">你好，我是作业导入助手。把试卷照片、成绩单表格或作业平台链接直接发给我（可点 📎 上传，也可以 Ctrl+V 粘贴截图），我会自动整理成错题草稿；导入到哪节课我会在对话里跟你确认，确认草稿前不会写入任何数据。</div>';return}iaEvents.forEach(ev=>{if(ev.kind!=='draft')box.appendChild(iaEventNode(ev))});box.scrollTop=box.scrollHeight}
+function iaAppendEvents(evs){if(!evs.length)return;iaEvents.push(...evs);const box=$('#ia-chat');if(!box)return;if(box.querySelector('.ia-empty'))box.innerHTML='';evs.forEach(ev=>{if(ev.kind!=='draft')box.appendChild(iaEventNode(ev))});box.scrollTop=box.scrollHeight}
+function iaRenderDrafts(){const box=$('#ia-drafts');if(!box)return;
+ box.innerHTML=iaDrafts.map((d,i)=>{const rows=d.rows||[],show=rows.slice(0,8);return `<div class="ia-draft"><h3>${esc(d.title||'导入草稿')}</h3>${d.summary?`<p class="ia-sum">${esc(d.summary)}</p>`:''}${d.unmatched&&d.unmatched.length?`<div class="ia-warn">未匹配名单：${d.unmatched.map(esc).join('、')}，导入后将进待确认由老师指定学生</div>`:''}${rows.length?`<table class="ia-table"><tr><th>学生</th><th>题目</th><th>知识点</th><th>错误类型</th><th>得分</th><th>置信度</th></tr>${show.map(r=>`<tr><td>${esc(r.studentName)}</td><td>${esc(r.question)}</td><td>${esc(r.knowledgePoint)}</td><td>${esc(r.errorType)}</td><td>${r.score??''}</td><td>${r.confidence??''}</td></tr>`).join('')}</table>${rows.length>8?`<p class="ia-line">共 ${rows.length} 行，仅预览前 8 行</p>`:''}`:'<p class="ia-line">这份草稿没有可导入的明细行。</p>'}<div class="rv-actions"><button class="rv-confirm ia-confirm" data-i="${i}">✓ 确认导入</button><button class="rv-ignore ia-discard" data-i="${i}">丢弃</button></div></div>`}).join('');
+ box.querySelectorAll('.ia-confirm').forEach(b=>b.onclick=async()=>{b.disabled=true;try{const r=await api(`/api/import-agent/sessions/${iaSid}/confirm`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({draftIndex:+b.dataset.i})});toast(`已导入 ${r.confirmed} 条错题${r.pending?`，${r.pending} 条进待确认`:''}${r.title?`：${r.title}`:''}`);await iaSync();await refresh();if(ws&&ws.lesson)await reloadWs()}catch(e){toast(e.message);b.disabled=false}});
+ box.querySelectorAll('.ia-discard').forEach(b=>b.onclick=async()=>{if(!confirm('丢弃这份导入草稿？（不可恢复）'))return;try{await api(`/api/import-agent/sessions/${iaSid}/discard`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({draftIndex:+b.dataset.i})});toast('已丢弃');await iaSync()}catch(e){toast(e.message)}});
+}
+function iaSetRunning(){const inp=$('#ia-input'),b=$('#ia-send');if(!inp)return;const running=iaStatus==='running';inp.disabled=running;if(b)b.disabled=running;inp.placeholder=running?'助手处理中…':'描述材料或补充说明，例如：这是 10 月月考，成绩单第一列是姓名…'}
+async function iaSync(){if(!iaSid)return;const s=await api(`/api/import-agent/sessions/${iaSid}`);iaStatus=s.status;iaAppendEvents((s.events||[]).slice(iaEvents.length));iaDrafts=s.drafts||[];iaRenderDrafts();iaSetRunning()}
+async function iaPollTick(){if(!iaSid){iaStopPoll();return}try{await iaSync();if(iaStatus!=='running')iaStopPoll()}catch(e){iaStopPoll();toast('同步助手进度失败：'+e.message)}}
+function iaStartPoll(){iaStopPoll();iaTimer=setInterval(iaPollTick,2000)}
+function iaAddFiles(list){let bad=0;for(const f of list){if(f.size>10*1024*1024){bad++;continue}iaFiles.push(f)}if(bad)toast(`${bad} 个文件超过 10MB，已跳过`);renderIaFiles()}
+function renderIaFiles(){const box=$('#ia-file-list');if(!box)return;box.innerHTML=iaFiles.map((f,i)=>`<span class="ia-chip">${esc(f.name)}<button type="button" data-i="${i}" title="移除">✕</button></span>`).join('');box.querySelectorAll('button').forEach(b=>b.onclick=()=>{iaFiles.splice(+b.dataset.i,1);renderIaFiles()})}
+async function iaSend(){const inp=$('#ia-input');if(!inp||iaStatus==='running')return;const text=inp.value.trim();if(!text&&!iaFiles.length){toast('请输入说明，或先选择材料文件');return}const b=$('#ia-send');b.disabled=true;
+ try{
+  await iaEnsure();
+  const paths=[];let n=0;
+  for(const f of iaFiles){if(f.size>10*1024*1024)throw Error(`${f.name} 超过 10MB`);n++;inp.placeholder=`正在上传材料 ${n}/${iaFiles.length}…`;const src=await new Promise((ok,no)=>{const r=new FileReader;r.onload=()=>ok(r.result);r.onerror=no;r.readAsDataURL(f)});paths.push((await api('/api/upload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:src})})).path)}
+  await api(`/api/import-agent/sessions/${iaSid}/message`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,files:paths})});
+  iaFiles=[];renderIaFiles();inp.value='';iaStatus='running';iaSetRunning();iaStartPoll();iaPollTick();
+ }catch(e){toast(e.message);iaSetRunning()}
+}
+function iaEnter(){renderIaFiles();iaRenderChat();iaRenderDrafts();iaSetRunning();if(iaSid)iaSync().catch(()=>{});if(iaStatus==='running')iaStartPoll()}
+function iaBindPage(){
+ $('#ia-browse').onclick=()=>$('#ia-file').click();
+ $('#ia-file').onchange=e=>{iaAddFiles([...e.target.files]);e.target.value=''};
+ $('#ia-input').addEventListener('paste',e=>{const fs=[...(e.clipboardData?.files||[])].filter(f=>f.type.startsWith('image/'));if(fs.length){e.preventDefault();iaAddFiles(fs)}});
+ $('#ia-input').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();iaSend()}});
+ $('#ia-send').onclick=iaSend;
 }
 // 简易图片查看（作业原图 / 待确认证据）
 function openImgGallery(images,title){let i=0;const m=$('#img-modal');const show=()=>{$('#img-modal-title').textContent=`${title}（${i+1}/${images.length}）`;$('#img-modal-img').src=images[i];$('#img-modal-prev').style.display=images.length>1?'':'none';$('#img-modal-next').style.display=images.length>1?'':'none'};$('#img-modal-prev').onclick=()=>{i=(i-1+images.length)%images.length;show()};$('#img-modal-next').onclick=()=>{i=(i+1)%images.length;show()};show();m.classList.add('show')}

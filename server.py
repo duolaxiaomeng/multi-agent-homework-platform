@@ -2,11 +2,11 @@
 """本地运行的学生错题管理与统计系统。"""
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, parse_qs
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime
-import base64, hashlib, hmac, json, mimetypes, os, re, secrets, shutil, sqlite3, threading, time, uuid
+import base64, hashlib, hmac, io, json, mimetypes, os, re, secrets, shutil, sqlite3, threading, time, uuid
 
 ROOT = Path(__file__).parent
 DATA_FILE = ROOT / "data.json"
@@ -19,8 +19,9 @@ UPLOADS = ROOT / "uploads"
 UPLOADS.mkdir(exist_ok=True)
 
 DEFAULT = {"classes": [], "students": [], "assignments": [], "mistakes": [], "seats": [], "performances": [],
-           "lessons": [], "attendance": [], "submissions": [], "version": "v0.2"}
-DATA_VERSION = "v0.2"
+           "lessons": [], "attendance": [], "submissions": [], "studentClassHistory": [], "version": "v0.3"}
+import students as stu
+DATA_VERSION = stu.DATA_VERSION
 BACKUP_FILE = ROOT / "data_v1_backup.json"
 MODELS = {
     "qwen3.7-plus": {"provider": "阿里云百炼", "providerKey":"qwen", "model": "qwen3.7-plus", "label": "Qwen3.7 Plus｜效果优先"},
@@ -96,6 +97,18 @@ def migrate_v02():
     data["version"] = DATA_VERSION
     write_data(data)
     print(f"[学生管理系统] 数据已检查/迁移到 {DATA_VERSION}：课次 {len(data['lessons'])} 个")
+
+def migrate_v03():
+    """升级到 V0.3 学生信息底座：学生档案补字段、课次回填名单快照、学生账号补 studentId 绑定。幂等。"""
+    data = read_data()
+    if stu.migrate_v03_data(data):
+        write_data(data)
+        print(f"[学生管理系统] 数据已检查/迁移到 {DATA_VERSION}：学生 {len(data['students'])} 人")
+    store = read_users()
+    if stu.migrate_users_binding(store["users"], data["students"]):
+        write_users(store)
+        print("[学生管理系统] 学生账号绑定已检查/迁移")
+
 
 def read_settings():
     if not SETTINGS_FILE.exists(): return DEFAULT_SETTINGS.copy()
@@ -179,8 +192,13 @@ def read_users():
 def write_users(store):
     USERS_FILE.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def public_user(u):
-    return {"id": u["id"], "username": u["username"], "realName": u.get("realName", ""), "role": u.get("role", "teacher"), "lastLoginAt": u.get("lastLoginAt", "")}
+def public_user(u, students=None):
+    out = {"id": u["id"], "username": u["username"], "realName": u.get("realName", ""), "role": u.get("role", "teacher"),
+           "lastLoginAt": u.get("lastLoginAt", ""), "studentId": u.get("studentId", "")}
+    if u.get("role") == "student" and students is not None:
+        st = next((s for s in students if s["id"] == u.get("studentId")), None)
+        out["boundStudentName"] = st["name"] if st else ""
+    return out
 
 def hash_password(password, salt=None):
     salt = salt or secrets.token_hex(16)
@@ -221,8 +239,8 @@ def seed_admin():
         write_users(store)
         print(f"[学生管理系统] 已创建内置管理员账号：{ADMIN_USERNAME}")
 
-def make_user(username, password, real_name, role):
-    return {"id": make_id("user"), "username": username, "realName": real_name, "role": role,
+def make_user(username, password, real_name, role, student_id=""):
+    return {"id": make_id("user"), "username": username, "realName": real_name, "role": role, "studentId": student_id,
             "passwordHash": hash_password(password), "createdAt": datetime.now().isoformat(timespec="seconds"), "lastLoginAt": ""}
 
 def validate_account(username, password, role, real_name=""):
@@ -252,8 +270,9 @@ def filtered_data(user):
         submissions = [s for s in data["submissions"] if s["lessonId"] in lesson_ids]
         return {"classes": classes, "students": students, "assignments": assignments, "mistakes": mistakes, "seats": seats,
                 "performances": performances, "lessons": lessons, "attendance": attendance, "submissions": submissions}
-    name = re.sub(r"\s+", "", user.get("realName", "") or user["username"])
-    mine = [s for s in data["students"] if re.sub(r"\s+", "", s["name"]) == name]
+    # 学生账号：只按绑定的 studentId 取数（账号创建/绑定时确定，不再按姓名动态匹配）
+    sid = user.get("studentId", "")
+    mine = [s for s in data["students"] if s["id"] == sid] if sid else []
     student_ids = {s["id"] for s in mine}
     mistakes = [m for m in data["mistakes"] if m.get("studentId") in student_ids]
     assignment_ids = {m["assignmentId"] for m in mistakes}
@@ -339,39 +358,23 @@ def class_students(data, class_id):
     return [s for s in data["students"] if s["classId"] == class_id]
 
 def lesson_students(data, lesson):
-    """一节课的完整名单：本班学生 + 调课加入的外班学生（extraStudentIds）。"""
-    base = class_students(data, lesson["classId"])
-    extra_ids = [x for x in lesson.get("extraStudentIds", []) if x]
-    extra = [s for s in data["students"] if s["id"] in extra_ids and s["classId"] != lesson["classId"]]
-    return base + extra
+    """一节课的完整名单：创建时的名单快照（rosterIds）+ 调课加入的外班学生。
+    学生后来转班/归档不会改变历史课次名单。"""
+    return stu.lesson_roster(lesson, data)
 
 def ensure_lesson_attendance(data, lesson, user):
-    """课次创建时为名单内学生生成默认“缺勤”考勤（含调课加入的外班学生）；
-    安排到座位上的学生会被改为“已到”。之后加入的学生不回填历史课次。"""
+    """课次创建时为名单内学生生成默认“已到”考勤（含调课加入的外班学生），老师只需改迟到/请假/缺勤/早退。
+    之后加入的学生不回填历史课次。"""
     now = datetime.now().isoformat(timespec="seconds")
     existing = {a["studentId"] for a in data["attendance"] if a["lessonId"] == lesson["id"]}
     for st in lesson_students(data, lesson):
         if st["id"] in existing: continue
         data["attendance"].append({"id": make_id("attendance"), "lessonId": lesson["id"], "studentId": st["id"],
-                                   "status": "absent", "note": "", "updatedBy": user.get("id", ""), "updatedAt": now})
-
-def seat_overrides(data, lesson):
-    """座位上有人的学生，其考勤判定为“已到”（覆盖默认/手动状态）；
-    手动改过非缺勤状态（迟到/请假/早退）的学生不被座位覆盖。"""
-    seated = {s["studentId"] for s in data["seats"] if s["classId"] == lesson["classId"] and s.get("studentId")}
-    overrides = {}
-    for a in data["attendance"]:
-        if a["lessonId"] != lesson["id"]: continue
-        sid = a["studentId"]
-        if sid in seated and a["status"] == "absent":
-            overrides[sid] = "present"
-    return overrides
+                                   "status": "present", "note": "", "updatedBy": user.get("id", ""), "updatedAt": now})
 
 def effective_attendance(data, lesson):
-    """返回 {studentId: status}：座位有人即已到，其余按考勤记录（默认缺勤）。"""
-    att = {a["studentId"]: a["status"] for a in data["attendance"] if a["lessonId"] == lesson["id"]}
-    att.update(seat_overrides(data, lesson))
-    return att
+    """返回 {studentId: status}：按考勤记录，缺记录默认“已到”。"""
+    return {a["studentId"]: a["status"] for a in data["attendance"] if a["lessonId"] == lesson["id"]}
 
 def lesson_pending_count(data, lesson_id):
     return sum(1 for m in data["mistakes"] if m.get("lessonId") == lesson_id and m.get("status") == "pending")
@@ -413,13 +416,13 @@ def analyze_submission(data, lesson, submission):
     return saved, pending_n
 
 def lesson_summary(data, lesson):
-    """首页课次卡片摘要。座位有人即判定已到。名单含调课外班学生。"""
+    """首页课次卡片摘要。名单含调课外班学生；无考勤记录默认“已到”。"""
     students = lesson_students(data, lesson)
     att_eff = effective_attendance(data, lesson)
     att_counts = {k: sum(1 for s in att_eff.values() if s == k) for k in ATTENDANCE_STATUSES}
-    # 没有考勤记录的学生按默认缺勤计
+    # 没有考勤记录的学生按默认已到计
     missing = len(students) - len(att_eff)
-    if missing > 0: att_counts["absent"] += missing
+    if missing > 0: att_counts["present"] += missing
     subs = [s for s in data["submissions"] if s["lessonId"] == lesson["id"]]
     got = sum(1 for s in subs if s.get("images"))
     analyzed = sum(1 for s in subs if s.get("status") in ("pending_review", "completed"))
@@ -428,7 +431,7 @@ def lesson_summary(data, lesson):
             "pendingCount": lesson_pending_count(data, lesson["id"])}
 
 def build_insights(data, lesson):
-    """班级学情：统计只覆盖有证据的学生，缺勤/未交/未分析单独列出，不计入未掌握。座位有人即判定已到。名单含调课外班学生。"""
+    """班级学情：统计只覆盖有证据的学生，缺勤/未交/未分析单独列出，不计入未掌握。无考勤记录默认“已到”。名单含调课外班学生。"""
     students = lesson_students(data, lesson)
     att = effective_attendance(data, lesson)
     subs = {s["studentId"]: s for s in data["submissions"] if s["lessonId"] == lesson["id"]}
@@ -437,7 +440,7 @@ def build_insights(data, lesson):
     for m in mistakes: by_student.setdefault(m.get("studentId", ""), []).append(m)
     groups = {"absent": [], "not_submitted": [], "analyzing": [], "no_mistake": [], "has_mistake": [], "not_required": []}
     for st in students:
-        a_st, sub = att.get(st["id"], "absent"), subs.get(st["id"])
+        a_st, sub = att.get(st["id"], "present"), subs.get(st["id"])
         if a_st in ("absent", "leave"): groups["absent"].append(st["name"]); continue
         if sub and sub["status"] == "not_required": groups["not_required"].append(st["name"]); continue
         if not sub or not sub.get("images"): groups["not_submitted"].append(st["name"]); continue
@@ -452,7 +455,7 @@ def build_insights(data, lesson):
         etypes[m.get("errorType", "其他")] = etypes.get(m.get("errorType", "其他"), 0) + 1
     att_counts = {k: sum(1 for s in att.values() if s == k) for k in ATTENDANCE_STATUSES}
     missing = len(students) - len(att)
-    if missing > 0: att_counts["absent"] += missing
+    if missing > 0: att_counts["present"] += missing
     focus = sorted(((st["name"], len(by_student.get(st["id"], []))) for st in students if by_student.get(st["id"])),
                    key=lambda x: -x[1])[:5]
     return {"attendance": {"total": len(students), **att_counts},
@@ -468,7 +471,7 @@ def build_insights(data, lesson):
 def build_feedback(data, lesson, student, extra=""):
     """学生个体反馈：缺勤/未交用客观模板直出；有证据时调 Agent 生成并保存 md。座位有人即判定已到。"""
     att_eff = effective_attendance(data, lesson)
-    att_status = att_eff.get(student["id"], "absent")
+    att_status = att_eff.get(student["id"], "present")
     sub = next((s for s in data["submissions"] if s["lessonId"] == lesson["id"] and s["studentId"] == student["id"]), None)
     assignment = next((a for a in data["assignments"] if a["id"] == lesson.get("assignmentId")), {})
     perfs = [p for p in data["performances"] if p.get("studentId") == student["id"] and p.get("assignmentId", "") == lesson.get("assignmentId")]
@@ -712,6 +715,110 @@ def chat_model(settings, system_prompt, messages):
     out = http_json(url, {"model":choice["model"], "messages":[{"role":"system", "content":system_prompt}] + messages}, headers)
     return out["choices"][0]["message"]["content"]
 
+# ---------------- 智能导入助手（工具调用 Agent） ----------------
+import import_agent
+
+IMPORT_SESSIONS = {}          # sessionId -> session dict（内存态，服务重启即清空；草稿确认后才落库）
+IMPORT_LOCK = threading.Lock()
+IMPORT_SESSION_TTL = 2 * 3600  # 空闲 2 小时的会话被清理
+
+
+def chat_with_tools(settings, messages, tools):
+    """OpenAI 兼容的工具调用：返回完整 assistant message（可能带 tool_calls）。"""
+    choice = MODELS.get(settings["model"])
+    if not choice: raise ValueError("请先在“设置”中选择模型")
+    key = model_api_key(choice, settings)
+    if not key: raise ValueError("请先在“设置”中填写 API Key")
+    url, headers = model_client(choice, key)
+    payload = {"model": choice["model"], "messages": messages, "tools": tools}
+    try:
+        out = http_json(url, payload, headers, timeout=import_agent.STEP_TIMEOUT)
+    except ValueError as exc:
+        msg = str(exc)
+        if "tool" in msg.lower() or "function" in msg.lower():
+            msg += "（当前模型可能不支持工具调用，建议在“设置”中切换到 Kimi K3 后重试）"
+        raise ValueError(msg)
+    return out["choices"][0]["message"]
+
+
+def _import_session(sid, user):
+    with IMPORT_LOCK:
+        s = IMPORT_SESSIONS.get(sid)
+    if not s or s["userId"] != user["id"]: return None
+    s["updatedAt"] = time.time()
+    return s
+
+
+def _import_emit(s, kind, text, **extra):
+    with IMPORT_LOCK:
+        s["events"].append({"t": datetime.now().isoformat(timespec="seconds"), "kind": kind, "text": text, **extra})
+        if len(s["events"]) > 300: s["events"] = s["events"][-300:]
+
+
+def _import_cleanup():
+    now = time.time()
+    with IMPORT_LOCK:
+        for sid in [k for k, s in IMPORT_SESSIONS.items()
+                    if now - s.get("updatedAt", 0) > IMPORT_SESSION_TTL and s.get("status") != "running"]:
+            IMPORT_SESSIONS.pop(sid, None)
+
+
+def _import_run(sid):
+    """后台线程：执行一轮工具循环，事件写入会话供前端轮询。"""
+    with IMPORT_LOCK:
+        s = IMPORT_SESSIONS.get(sid)
+    if not s: return
+    try:
+        user = s["user"]
+        data = filtered_data(user)
+        lesson = find_lesson(data, s["lessonId"]) if s.get("lessonId") else None
+        system = import_agent.SOUL
+        if lesson:
+            cls = next((c["name"] for c in data["classes"] if c["id"] == lesson.get("classId")), "")
+            system += f"\n\n本次导入目标课次：{lesson.get('date') or '未排期'} 第{lesson.get('period') or '?'}节 {cls}。所有草稿默认挂到该课次。"
+        def chat(messages, tools):
+            return chat_with_tools(read_settings(), [{"role": "system", "content": system}] + messages, tools)
+        def image_message(path):
+            raw, mime = image_part(path)
+            return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{raw}"}}
+        ctx = import_agent.Ctx(user=user, lesson=lesson, chat=chat, image_message=image_message,
+                               data_snapshot=lambda: filtered_data(user), uploads_root=UPLOADS,
+                               emit=lambda kind, text, **kw: _import_emit(s, kind, text, **kw))
+        reply = import_agent.run_agent(ctx, s["messages"], s["drafts"])
+        with IMPORT_LOCK:
+            s["status"] = "idle"
+        _import_emit(s, "message", reply)
+    except Exception as exc:
+        with IMPORT_LOCK:
+            s["status"] = "error"
+        _import_emit(s, "error", str(exc))
+
+
+def _import_confirm(s, draft_index):
+    """老师确认草稿 → 落库为课次错题（高置信直接确认，其余进待确认）。返回统计。"""
+    with IMPORT_LOCK:
+        if not (0 <= draft_index < len(s["drafts"])): raise ValueError("草稿不存在")
+        draft = s["drafts"].pop(draft_index)
+    data = read_data()
+    lesson = find_lesson(data, draft.get("lessonId") or s.get("lessonId") or "")
+    if not lesson or not lesson_in_scope(s["user"], data, lesson): raise ValueError("草稿没有有效的目标课次，无法导入")
+    now = datetime.now().isoformat(timespec="seconds")
+    confirmed = pending = 0
+    for r in draft["rows"]:
+        conf = float(r.get("confidence", 0) or 0)
+        ok = bool(r.get("studentId")) and conf >= CONFIDENCE_THRESHOLD
+        data["mistakes"].append({"id": make_id("mistake"), "lessonId": lesson["id"], "submissionId": "",
+                                 "studentId": r.get("studentId", ""), "assignmentId": lesson.get("assignmentId", ""),
+                                 "question": r["question"], "knowledgePoint": r["knowledgePoint"],
+                                 "errorType": r["errorType"], "status": "confirmed" if ok else "pending",
+                                 "confidence": conf, "note": (f"[智能导入·{draft['title']}] " + r.get("note", "")).strip(),
+                                 "image": "", "images": [], "reviewedBy": "", "reviewedAt": "",
+                                 "createdAt": now})
+        confirmed, pending = confirmed + ok, pending + (not ok)
+    recompute_lesson_status(data, lesson)
+    write_data(data)
+    return {"confirmed": confirmed, "pending": pending, "title": draft["title"]}
+
 class App(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("[学生管理系统] " + fmt % args)
@@ -752,13 +859,310 @@ class App(SimpleHTTPRequestHandler):
             return False
         return True
 
+    # ---------------- 学生信息管理 API ----------------
+    def _class_in_scope(self, data, class_id):
+        if self.user.get("role") == "admin": return True
+        cls = next((c for c in data["classes"] if c["id"] == class_id), None)
+        return bool(cls) and cls.get("ownerId") in (None, "", self.user["id"])
+
+    def _student_in_scope(self, data, st):
+        return bool(st) and self._class_in_scope(data, st.get("classId", ""))
+
+    def students_get(self, path, query):
+        data = filtered_data(self.user)
+        if path == "/api/students":
+            out = []
+            for s in data["students"]:
+                cls_id, status = s.get("classId", ""), s.get("status", "active")
+                if query.get("classId") and cls_id != query["classId"][0]: continue
+                if query.get("status") and status != query["status"][0]: continue
+                if not query.get("archived") and status == "archived": continue
+                kw = (query.get("keyword", [""])[0] or "").strip().lower()
+                if kw and kw not in s["name"].lower() and kw not in (s.get("studentNo", "").lower()): continue
+                cls_name = next((c["name"] for c in data["classes"] if c["id"] == cls_id), "")
+                out.append({**s, "className": cls_name})
+            no_no = sum(1 for s in data["students"] if s.get("status", "active") == "active" and not s.get("studentNo"))
+            return self.send_json({"students": out, "missingStudentNo": no_no})
+        if path == "/api/students/export.csv":
+            cls_id = query.get("classId", [""])[0]
+            rows = [s for s in data["students"] if not cls_id or s.get("classId") == cls_id]
+            names = {c["id"]: c["name"] for c in data["classes"]}
+            payload = stu.students_csv(rows, names).encode("utf-8-sig")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", "attachment; filename=students.csv")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers(); self.wfile.write(payload)
+            return
+        parts = path.strip("/").split("/")
+        if len(parts) == 3 and parts[1] == "students":
+            st = next((s for s in data["students"] if s["id"] == parts[2]), None)
+            if not st: return self.send_json({"error": "学生不存在或无权查看"}, 404)
+            sid = st["id"]
+            att = [a for a in data["attendance"] if a["studentId"] == sid]
+            att_counts = {k: sum(1 for a in att if a["status"] == k) for k in ATTENDANCE_STATUSES}
+            subs = [s for s in data["submissions"] if s["studentId"] == sid]
+            mistakes = [m for m in data["mistakes"] if m.get("studentId") == sid]
+            perfs = sorted([p for p in data["performances"] if p.get("studentId") == sid],
+                           key=lambda p: p.get("createdAt", ""), reverse=True)[:5]
+            amap = {a["id"]: a for a in data["assignments"]}
+            for p in perfs:
+                a = amap.get(p.get("assignmentId", ""), {})
+                p["lessonLabel"] = f"{a.get('date', '')} 第{a.get('period') or '?'}节 {a.get('title', '')}".strip()
+            lessons = [l for l in data["lessons"] if sid in (l.get("rosterIds") or []) or l.get("classId") == st.get("classId")]
+            lessons = sorted(lessons, key=lambda l: (l.get("date", ""), l.get("period", "")), reverse=True)[:8]
+            lesson_rows = [{"id": l["id"], "date": l.get("date"), "period": l.get("period"), "status": l.get("status"),
+                            "statusName": LESSON_STATUSES.get(l.get("status"), l.get("status")),
+                            "title": amap.get(l.get("assignmentId"), {}).get("title", "")} for l in lessons]
+            safe = re.sub(r'[\\/:*?"<>|\s]+', "_", st["name"])
+            feedbacks = sorted((f.name for f in AGENT_OUTPUT_DIR.glob(f"反馈-{safe}-*.md")), reverse=True)[:5] if AGENT_OUTPUT_DIR.is_dir() else []
+            cls_name = next((c["name"] for c in data["classes"] if c["id"] == st.get("classId")), "")
+            return self.send_json({"student": {**st, "className": cls_name},
+                                   "attendance": {"total": len(att), **att_counts},
+                                   "submissions": {"total": len(subs), "withImages": sum(1 for s in subs if s.get("images"))},
+                                   "mistakes": {"confirmed": sum(1 for m in mistakes if m.get("status") == "confirmed"),
+                                                "pending": sum(1 for m in mistakes if m.get("status") == "pending")},
+                                   "performances": perfs, "lessons": lesson_rows, "feedbacks": feedbacks,
+                                   "history": [h for h in data["studentClassHistory"] if h["studentId"] == sid]})
+        return self.send_json({"error": "接口不存在"}, 404)
+
+    def students_post(self, path, body):
+        data = read_data()
+        now = datetime.now().isoformat(timespec="seconds")
+        if path == "/api/students":
+            cls_id = body.get("classId", "")
+            if not self._class_in_scope(data, cls_id): raise ValueError("班级不存在或无权操作")
+            cleaned = stu.validate_student_payload(data, body)
+            st = {"id": make_id("student"), "classId": cls_id, **cleaned,
+                  "status": "active", "createdAt": now, "updatedAt": now, "archivedAt": ""}
+            data["students"].append(st)
+            data["studentClassHistory"].append({"id": make_id("history"), "studentId": st["id"], "fromClassId": "",
+                                                "toClassId": cls_id, "action": "enroll", "reason": "",
+                                                "operatedBy": self.user["id"], "operatedAt": now})
+            write_data(data); return self.send_json(st, 201)
+        if path == "/api/students/import-preview":
+            cls_id = body.get("classId", "")
+            if not self._class_in_scope(data, cls_id): raise ValueError("班级不存在或无权操作")
+            text = body.get("text", "")
+            fpath = body.get("path", "")
+            if fpath:
+                file = ROOT / fpath
+                if not fpath.startswith("uploads/") or not file.is_file(): raise ValueError("文件不存在")
+                if file.suffix.lower() == ".xlsx":
+                    try:
+                        import openpyxl
+                        wb = openpyxl.load_workbook(file, read_only=True, data_only=True)
+                        text = "\n".join(",".join("" if v is None else str(v) for v in row)
+                                         for row in wb.worksheets[0].iter_rows(values_only=True))
+                        wb.close()
+                    except ImportError: raise ValueError("服务器未安装 openpyxl，无法解析 xlsx")
+                    except Exception as exc: raise ValueError(f"无法解析表格：{exc}")
+                else:
+                    text = file.read_text(encoding="utf-8-sig", errors="replace")
+            rows = stu.parse_import_text(text)
+            if not rows: raise ValueError("没有解析到任何学生行，请检查内容")
+            preview, counts = stu.preview_import(data, cls_id, rows)
+            return self.send_json({"rows": preview, "counts": counts})
+        if path == "/api/students/import-confirm":
+            cls_id = body.get("classId", "")
+            if not self._class_in_scope(data, cls_id): raise ValueError("班级不存在或无权操作")
+            rows = body.get("rows", [])
+            if not isinstance(rows, list) or not rows: raise ValueError("没有可导入的学生")
+            if len(rows) > 500: raise ValueError("单次最多导入 500 人")
+            new_students = stu.build_import_students(data, cls_id, rows, make_id)  # 校验失败抛错，不会写入一半
+            for st in new_students:
+                data["students"].append(st)
+                data["studentClassHistory"].append({"id": make_id("history"), "studentId": st["id"], "fromClassId": "",
+                                                    "toClassId": cls_id, "action": "enroll", "reason": "批量导入",
+                                                    "operatedBy": self.user["id"], "operatedAt": now})
+            write_data(data)
+            return self.send_json({"imported": len(new_students)}, 201)
+        parts = path.strip("/").split("/")
+        if len(parts) == 4 and parts[1] == "students":
+            st = next((s for s in data["students"] if s["id"] == parts[2]), None)
+            if not self._student_in_scope(data, st): raise ValueError("学生不存在或无权操作")
+            action = parts[3]
+            if action == "update":
+                # 只更新本次传入的字段（不传不覆盖）
+                name = body.get("name")
+                if name is not None and name.strip():
+                    cleaned = stu.validate_student_payload(data, {"name": name, "studentNo": body.get("studentNo", st.get("studentNo", "")),
+                        "gender": body.get("gender", st.get("gender", "unknown")), "enrollmentYear": body.get("enrollmentYear", st.get("enrollmentYear", "")),
+                        "phone": body.get("phone", st.get("phone", "")), "note": body.get("note", st.get("note", ""))}, exclude_id=st["id"])
+                else:
+                    cleaned = stu.validate_student_payload(data, {"name": st["name"], "studentNo": body.get("studentNo", st.get("studentNo", "")),
+                        "gender": body.get("gender", st.get("gender", "unknown")), "enrollmentYear": body.get("enrollmentYear", st.get("enrollmentYear", "")),
+                        "phone": body.get("phone", st.get("phone", "")), "note": body.get("note", st.get("note", ""))}, exclude_id=st["id"])
+                st.update(cleaned); st["updatedAt"] = now
+                write_data(data); return self.send_json(st)
+            if action == "transfer":
+                to_id = body.get("toClassId", "")
+                if to_id == st["classId"]: raise ValueError("学生已在该班级")
+                if not self._class_in_scope(data, to_id): raise ValueError("目标班级不存在或无权操作")
+                from_id = st["classId"]
+                st["classId"] = to_id; st["status"] = "active"; st["archivedAt"] = ""; st["updatedAt"] = now
+                data["studentClassHistory"].append({"id": make_id("history"), "studentId": st["id"], "fromClassId": from_id,
+                                                    "toClassId": to_id, "action": "transfer",
+                                                    "reason": str(body.get("reason", "")).strip(),
+                                                    "operatedBy": self.user["id"], "operatedAt": now})
+                write_data(data); return self.send_json(st)
+            if action == "archive":
+                st["status"] = "archived"; st["archivedAt"] = now; st["updatedAt"] = now
+                data["studentClassHistory"].append({"id": make_id("history"), "studentId": st["id"], "fromClassId": st["classId"],
+                                                    "toClassId": "", "action": "leave",
+                                                    "reason": str(body.get("reason", "")).strip() or "归档",
+                                                    "operatedBy": self.user["id"], "operatedAt": now})
+                write_data(data); return self.send_json(st)
+            if action == "restore":
+                st["status"] = "active"; st["archivedAt"] = ""; st["updatedAt"] = now
+                data["studentClassHistory"].append({"id": make_id("history"), "studentId": st["id"], "fromClassId": "",
+                                                    "toClassId": st["classId"], "action": "restore", "reason": "",
+                                                    "operatedBy": self.user["id"], "operatedAt": now})
+                write_data(data); return self.send_json(st)
+            if action == "status":  # 转出 / 休学 / 毕业
+                status = body.get("status", "")
+                if status not in ("transferred", "suspended", "graduated", "active"): raise ValueError("状态不合法")
+                st["status"] = status; st["updatedAt"] = now
+                st["archivedAt"] = "" if status == "active" else st.get("archivedAt", "")
+                act = {"transferred": "transfer", "suspended": "leave", "graduated": "graduate", "active": "restore"}[status]
+                data["studentClassHistory"].append({"id": make_id("history"), "studentId": st["id"], "fromClassId": st["classId"],
+                                                    "toClassId": st["classId"] if status == "active" else "", "action": act,
+                                                    "reason": str(body.get("reason", "")).strip(),
+                                                    "operatedBy": self.user["id"], "operatedAt": now})
+                write_data(data); return self.send_json(st)
+            raise ValueError("不支持的操作")
+        if len(parts) == 4 and parts[1] == "classes" and parts[3] == "archive":
+            cls = next((c for c in data["classes"] if c["id"] == parts[2]), None)
+            if not cls or not self._class_in_scope(data, cls["id"]): raise ValueError("班级不存在或无权操作")
+            cls["archived"] = bool(body.get("archived", True))
+            write_data(data)
+            return self.send_json({"ok": True, "archived": cls["archived"]})
+        return self.send_json({"error": "接口不存在"}, 404)
+
+    def backup_get(self):
+        """下载完整业务数据备份（zip：data.json + uploads + agent输出 + agents + meta）。
+        不包含 ~/.student-stats 下的密钥与账号信息。"""
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("backup_meta.json", json.dumps({"version": DATA_VERSION, "createdAt": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False))
+            if DATA_FILE.exists(): zf.write(DATA_FILE, DATA_FILE.name)
+            for f in sorted(UPLOADS.rglob("*")):
+                if f.is_file(): zf.write(f, str(f.relative_to(ROOT)))
+            for d in (AGENT_OUTPUT_DIR, AGENTS_DIR):
+                if not d.is_dir(): continue
+                for f in sorted(d.rglob("*")):
+                    if f.is_file(): zf.write(f, str(f.relative_to(ROOT)))
+        payload = buf.getvalue(); buf.close()
+        ts = datetime.now().strftime("%Y%m%d-%H%M")
+        fname = f"xuesheng-beifen-{ts}.zip"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{fname}")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers(); self.wfile.write(payload)
+
+    def backup_restore(self, body):
+        """从备份恢复：校验格式 → 备份当前数据到 ~/.student-stats/restore-backups → 写入。"""
+        if not body.get("confirm"): raise ValueError("请在请求中带上 confirm 确认恢复")
+        raw = body.get("data", "")
+        header, encoded = raw.split(",", 1) if "," in raw else ("", "")
+        if not raw.startswith("data:application/zip") and not raw.startswith("data:application/x-zip"):
+            raise ValueError("请上传 .zip 格式的备份文件")
+        import zipfile
+        buf = io.BytesIO(base64.b64decode(encoded))
+        with zipfile.ZipFile(buf) as zf:
+            names = zf.namelist()
+            if "data.json" not in names: raise ValueError("备份中没有 data.json")
+            # 校验 data.json 格式
+            raw_data = zf.read("data.json").decode("utf-8")
+            try:
+                test = json.loads(raw_data)
+                for k in DEFAULT: test.setdefault(k, DEFAULT[k].copy() if isinstance(DEFAULT[k], list) else DEFAULT[k])
+            except json.JSONDecodeError: raise ValueError("data.json 格式损坏")
+            # 禁止路径穿越
+            for name in names:
+                parts = Path(name).parts
+                if ".." in parts or name.startswith("/"): raise ValueError(f"备份包含非法路径：{name}")
+            # 备份当前数据到恢复备份目录
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            rb = CONFIG_DIR / "restore-backups" / ts
+            rb.mkdir(parents=True, exist_ok=True)
+            if DATA_FILE.exists(): shutil.copy2(DATA_FILE, rb / "data.json")
+            if UPLOADS.is_dir() and any(UPLOADS.iterdir()): shutil.copytree(UPLOADS, rb / "uploads", dirs_exist_ok=True)
+            if AGENT_OUTPUT_DIR.is_dir(): shutil.copytree(AGENT_OUTPUT_DIR, rb / "agent输出", dirs_exist_ok=True)
+            if AGENTS_DIR.is_dir(): shutil.copytree(AGENTS_DIR, rb / "agents", dirs_exist_ok=True)
+            # 清空并恢复
+            DATA_FILE.write_text(raw_data, encoding="utf-8")
+            for d in (UPLOADS, AGENT_OUTPUT_DIR, AGENTS_DIR):
+                for f in list(d.rglob("*")) if d.is_dir() else []:
+                    if f.is_file(): f.unlink()
+            for name in names:
+                if name == "data.json": continue
+                zf.extract(name, ROOT)
+            buf.close()
+        print(f"[学生管理系统] 备份已恢复到 {datetime.now().isoformat(timespec='seconds')}，旧数据备份在 {rb}")
+        return self.send_json({"ok": True, "note": "账号和 API Key 不在备份中，需要重新配置；旧数据备份在 ~/.student-stats/restore-backups/" + ts})
+
+    def import_agent_post(self, path, body):
+        """智能导入助手会话接口：建会话 / 发消息（后台跑）/ 确认草稿 / 丢弃草稿。"""
+        _import_cleanup()
+        if path == "/api/import-agent/sessions":
+            lesson_id = body.get("lessonId", "")
+            if lesson_id:
+                data = read_data()
+                lesson = find_lesson(data, lesson_id)
+                if not lesson or not lesson_in_scope(self.user, data, lesson):
+                    return self.send_json({"error": "课次不存在或无权访问"}, 404)
+            sid = make_id("import")
+            with IMPORT_LOCK:
+                IMPORT_SESSIONS[sid] = {"id": sid, "userId": self.user["id"], "user": self.user,
+                                        "lessonId": lesson_id, "source": body.get("source", ""),
+                                        "status": "idle", "events": [], "messages": [], "drafts": [],
+                                        "createdAt": time.time(), "updatedAt": time.time()}
+            _import_emit(IMPORT_SESSIONS[sid], "status", "会话已创建，请上传材料或直接说明需求")
+            return self.send_json({"sessionId": sid}, 201)
+        parts = path.strip("/").split("/")  # api / import-agent / sessions / :id / action
+        if len(parts) != 5 or parts[2] != "sessions": return self.send_json({"error": "接口不存在"}, 404)
+        s = _import_session(parts[3], self.user)
+        if not s: return self.send_json({"error": "会话不存在或已过期，请重新打开智能导入"}, 404)
+        action = parts[4]
+        if action == "message":
+            text = (body.get("text") or "").strip()
+            files = [p for p in body.get("files", []) if isinstance(p, str) and p.startswith("uploads/") and (ROOT / p).is_file()]
+            if not text and not files: raise ValueError("请输入说明或上传文件")
+            with IMPORT_LOCK:
+                if s["status"] == "running": raise ValueError("助手正在处理上一条消息，请稍候")
+                s["status"] = "running"
+            desc = text
+            if files:
+                desc += ("\n" if desc else "") + "老师上传了以下材料（可用对应工具读取）：\n" + "\n".join(f"- {p}" for p in files)
+            with IMPORT_LOCK:
+                s["messages"].append({"role": "user", "content": desc})
+            _import_emit(s, "user", text or f"上传了 {len(files)} 个文件")
+            threading.Thread(target=_import_run, args=(s["id"],), daemon=True).start()
+            return self.send_json({"ok": True})
+        if action == "confirm":
+            result = _import_confirm(s, int(body.get("draftIndex", -1)))
+            _import_emit(s, "status", f"草稿「{result['title']}」已导入：直接确认 {result['confirmed']} 条，进待确认 {result['pending']} 条")
+            return self.send_json(result)
+        if action == "discard":
+            idx = int(body.get("draftIndex", -1))
+            with IMPORT_LOCK:
+                if not (0 <= idx < len(s["drafts"])): raise ValueError("草稿不存在")
+                dropped = s["drafts"].pop(idx)
+            _import_emit(s, "status", f"草稿「{dropped['title']}」已丢弃")
+            return self.send_json({"ok": True})
+        return self.send_json({"error": "接口不存在"}, 404)
+
     def do_GET(self):
         if not self.check_auth(): return
         path = urlparse(self.path).path
         if path == "/api/auth/me":
             user = self.current_user()
             if not user: return self.send_json({"error": "请先登录"}, 401)
-            return self.send_json({"user": public_user(user)})
+            data = read_data()
+            return self.send_json({"user": public_user(user, data["students"])})
         if path == "/api/agent/soul":
             if self.user.get("role") == "student": return self.send_json({"error": "学生账号无权查看"}, 403)
             return self.send_json({"soul": read_agent_soul("通用", self.user)})
@@ -772,6 +1176,14 @@ class App(SimpleHTTPRequestHandler):
                 return self.send_json({"name": name, "soul": read_agent_soul(name, self.user), "source": soul_path(name, self.user)[1]})
             except ValueError as exc:
                 return self.send_json({"error": str(exc)}, 404)
+        if path.startswith("/api/import-agent/sessions/"):
+            if self.user.get("role") == "student": return self.send_json({"error": "学生账号无权查看"}, 403)
+            sid = path[len("/api/import-agent/sessions/"):].strip("/")
+            s = _import_session(sid, self.user)
+            if not s: return self.send_json({"error": "会话不存在或已过期"}, 404)
+            with IMPORT_LOCK:
+                return self.send_json({"status": s["status"], "events": list(s["events"]),
+                                       "drafts": list(s["drafts"]), "lessonId": s.get("lessonId", "")})
         if path == "/api/lessons":
             if self.user.get("role") == "student": return self.send_json({"error": "学生账号无权查看"}, 403)
             data = filtered_data(self.user)
@@ -793,10 +1205,6 @@ class App(SimpleHTTPRequestHandler):
             if not sub:
                 students = lesson_students(data, lesson)
                 att = [a for a in data["attendance"] if a["lessonId"] == lesson["id"]]
-                # 座位有人即判定已到：考勤列表应用座位覆盖后下发
-                overrides = seat_overrides(data, lesson)
-                for a in att:
-                    if a["studentId"] in overrides: a["status"] = overrides[a["studentId"]]
                 subs = [s for s in data["submissions"] if s["lessonId"] == lesson["id"]]
                 perfs = [p for p in data["performances"] if p.get("assignmentId", "") == lesson.get("assignmentId")]
                 mistakes = [m for m in data["mistakes"] if m.get("lessonId") == lesson["id"]]
@@ -827,8 +1235,19 @@ class App(SimpleHTTPRequestHandler):
         if path == "/api/users":
             if not self.require_admin(): return
             store = read_users()
-            return self.send_json({"users": [public_user(u) for u in store["users"]]})
+            data = read_data()
+            return self.send_json({"users": [public_user(u, data["students"]) for u in store["users"]]})
         if path == "/api/data": return self.send_json(filtered_data(self.user))
+        if path.startswith("/api/students") or path == "/api/backup" or path == "/api/auth/students":
+            if path == "/api/auth/students":
+                # 注册页公开学生列表（仅 id+name+className，本地工具无安全顾虑）
+                data = read_data()
+                names = {c["id"]: c["name"] for c in data["classes"]}
+                return self.send_json({"students": [{"id": s["id"], "name": s["name"], "className": names.get(s.get("classId", ""), ""),
+                    "studentNo": s.get("studentNo", "")} for s in data["students"] if s.get("status", "active") == "active"]})
+            if path == "/api/backup": return self.backup_get()
+            if self.user.get("role") == "student": return self.send_json({"error": "学生账号无权查看"}, 403)
+            return self.students_get(path, parse_qs(urlparse(self.path).query))
         if path == "/api/settings":
             s = read_settings(); selected=MODELS.get(s["model"], MODELS["qwen3.6-flash"])
             saved = {}
@@ -848,7 +1267,16 @@ class App(SimpleHTTPRequestHandler):
                 validate_account(username, password, role, real_name)
                 store = read_users()
                 if any(u["username"] == username for u in store["users"]): raise ValueError("该用户名已被注册")
-                user = make_user(username, password, real_name, role)
+                student_id = ""
+                if role == "student":
+                    # 学生自助注册：必须选择自己的学生档案，且姓名与档案一致
+                    data = read_data()
+                    student_id = body.get("studentId", "")
+                    st = next((s for s in data["students"] if s["id"] == student_id), None)
+                    if not st: raise ValueError("请选择要绑定的学生档案")
+                    if stu.norm_name(st["name"]) != stu.norm_name(real_name): raise ValueError("姓名与所选学生档案不一致")
+                    if not stu.bindable_check(store["users"], student_id): raise ValueError("该学生已绑定其他账号")
+                user = make_user(username, password, real_name, role, student_id)
                 store["users"].append(user); write_users(store)
                 return self.send_json({"token": make_token(store, user), "user": public_user(user)}, 201)
             if path == "/api/auth/login":
@@ -862,6 +1290,11 @@ class App(SimpleHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if self.user.get("role") == "student":
                 return self.send_json({"error": "学生账号仅可查看自己的错题"}, 403)
+            if path.startswith("/api/import-agent/"):
+                return self.import_agent_post(path, body)
+            if path.startswith("/api/students") or (path.startswith("/api/classes/") and path.endswith("/archive")) or path == "/api/backup/restore":
+                if path == "/api/backup/restore": return self.backup_restore(body)
+                return self.students_post(path, body)
             data = read_data()
             if path == "/api/agent/soul":
                 agent_dir(self.user).mkdir(parents=True, exist_ok=True)
@@ -964,9 +1397,31 @@ class App(SimpleHTTPRequestHandler):
                 validate_account(username, password, role, real_name)
                 store = read_users()
                 if any(u["username"] == username for u in store["users"]): raise ValueError("该用户名已被注册")
-                user = make_user(username, password, real_name, role)
+                student_id = ""
+                if role == "student":
+                    student_id = body.get("studentId", "")
+                    st = next((s for s in data["students"] if s["id"] == student_id), None)
+                    if not st: raise ValueError("创建学生账号必须选择绑定的学生")
+                    if not real_name: real_name = st["name"]
+                    if not stu.bindable_check(store["users"], student_id): raise ValueError("该学生已绑定其他学生账号，请先解绑")
+                user = make_user(username, password, real_name, role, student_id)
                 store["users"].append(user); write_users(store)
-                return self.send_json(public_user(user), 201)
+                return self.send_json(public_user(user, data["students"]), 201)
+            if len(parts) == 4 and parts[:2] == ["api", "users"] and parts[3] == "bind":
+                if not self.require_admin(): return
+                store = read_users()
+                user = next((u for u in store["users"] if u["id"] == parts[2]), None)
+                if not user or user.get("role") != "student": raise ValueError("学生账号不存在")
+                student_id = body.get("studentId", "")
+                if student_id:
+                    st = next((s for s in data["students"] if s["id"] == student_id), None)
+                    if not st: raise ValueError("学生不存在")
+                    if not stu.bindable_check(store["users"], student_id, user["id"]):
+                        raise ValueError(f"学生「{st['name']}」已绑定其他账号")
+                    if not user.get("realName"): user["realName"] = st["name"]
+                user["studentId"] = student_id  # 空字符串 = 解绑（待绑定）
+                write_users(store)
+                return self.send_json(public_user(user, data["students"]))
             if len(parts) == 4 and parts[:2] == ["api", "users"] and parts[3] == "password":
                 if not self.require_admin(): return
                 password = body.get("password", "")
@@ -1050,7 +1505,7 @@ class App(SimpleHTTPRequestHandler):
                 data["assignments"].append(assignment)
                 lesson = {"id": make_id("lesson"), "assignmentId": assignment["id"], "classId": class_id, "date": date,
                           "period": period, "status": "in_class", "createdBy": self.user["id"], "createdAt": now, "updatedAt": now,
-                          "extraStudentIds": []}
+                          "extraStudentIds": [], "rosterIds": stu.snapshot_for_new_lesson(data, class_id)}
                 data["lessons"].append(lesson)
                 ensure_lesson_attendance(data, lesson, self.user)
                 write_data(data); return self.send_json({**assignment, "lessonId": lesson["id"], "lesson": lesson}, 201)
@@ -1103,10 +1558,10 @@ class App(SimpleHTTPRequestHandler):
                     extra = lesson.setdefault("extraStudentIds", [])
                     if action == "add":
                         if sid not in extra: extra.append(sid)
-                        # 为调课生补一条默认缺勤考勤
+                        # 为调课生补一条默认已到考勤
                         if not any(a["lessonId"] == lesson["id"] and a["studentId"] == sid for a in data["attendance"]):
                             data["attendance"].append({"id": make_id("attendance"), "lessonId": lesson["id"], "studentId": sid,
-                                                       "status": "absent", "note": "", "updatedBy": self.user["id"],
+                                                       "status": "present", "note": "", "updatedBy": self.user["id"],
                                                        "updatedAt": datetime.now().isoformat(timespec="seconds")})
                     elif action == "remove":
                         lesson["extraStudentIds"] = [x for x in extra if x != sid]
@@ -1302,10 +1757,16 @@ class App(SimpleHTTPRequestHandler):
                 data["mistakes"].append(item)
             elif path == "/api/upload":
                 raw = body.get("data", "")
-                if not raw.startswith("data:image/"): raise ValueError("请上传图片文件")
-                header, encoded = raw.split(",", 1)
-                ext = ".png" if "png" in header else ".jpg"
-                name = make_id("work") + ext
+                if len(raw) > 14_000_000: raise ValueError("文件超过 10MB")
+                header, encoded = raw.split(",", 1) if "," in raw else ("", "")
+                mime = header[5:].split(";")[0] if header.startswith("data:") else ""
+                ext_map = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp", "image/gif": ".gif",
+                           "application/pdf": ".pdf", "text/csv": ".csv",
+                           "application/vnd.ms-excel": ".xls",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx"}
+                if mime not in ext_map: raise ValueError("只支持图片、PDF、Excel 或 CSV 文件")
+                prefix = "import" if ext_map[mime] in (".pdf", ".csv", ".xls", ".xlsx") else "work"
+                name = make_id(prefix) + ext_map[mime]
                 (UPLOADS / name).write_bytes(base64.b64decode(encoded))
                 return self.send_json({"path": f"uploads/{name}"})
             else:
@@ -1349,11 +1810,23 @@ class App(SimpleHTTPRequestHandler):
             data["attendance"] = [a for a in data["attendance"] if a.get("lessonId") != lid]
             data["submissions"] = [s for s in data["submissions"] if s.get("lessonId") != lid]
             data["mistakes"] = [m for m in data["mistakes"] if m.get("lessonId") != lid]
+            # 连带删除关联的课堂内容，避免总览/今日课表出现幽灵课程
+            if lesson.get("assignmentId"):
+                data["assignments"] = [a for a in data["assignments"] if a["id"] != lesson["assignmentId"]]
+                data["performances"] = [p for p in data["performances"] if p.get("assignmentId") != lesson["assignmentId"]]
             write_data(data); return self.send_json({"ok": True})
-        plural = {"classes":"classes", "students":"students", "assignments":"assignments", "mistakes":"mistakes", "seats":"seats", "performances":"performances"}.get(collection)
+        if collection == "classes":
+            data = read_data()
+            cls = next((c for c in data["classes"] if c["id"] == item_id), None)
+            if not cls: return self.send_json({"error": "班级不存在"}, 404)
+            active = [s for s in data["students"] if s["classId"] == item_id and s.get("status", "active") == "active"]
+            has_lessons = any(l["classId"] == item_id for l in data["lessons"])
+            if active: raise ValueError(f"班级里还有 {len(active)} 名在读学生，请先转班或归档后再删除")
+            if has_lessons: raise ValueError("该班级有历史课次，建议归档而非删除（在班级管理中点归档即可）")
+            data["classes"].remove(cls); write_data(data); return self.send_json({"ok": True})
+        plural = {"students":"students", "assignments":"assignments", "mistakes":"mistakes", "seats":"seats", "performances":"performances"}.get(collection)
         if not plural: return self.send_json({"error":"接口不存在"}, 404)
         data = read_data(); data[plural] = [x for x in data[plural] if x["id"] != item_id]
-        if collection == "classes": data["students"] = [x for x in data["students"] if x["classId"] != item_id]
         write_data(data); return self.send_json({"ok": True})
 
 if __name__ == "__main__":
@@ -1361,6 +1834,7 @@ if __name__ == "__main__":
     seed_admin()
     seed_agents()
     migrate_v02()
+    migrate_v03()
     host = os.environ.get("STATS_HOST", "127.0.0.1")
     port = int(os.environ.get("STATS_PORT", "8765"))
     print(f"\n学生管理与统计系统已启动：http://{host}:{port}\n按 Ctrl+C 可停止服务。")
