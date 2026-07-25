@@ -110,6 +110,14 @@ def migrate_v03():
         print("[学生管理系统] 学生账号绑定已检查/迁移")
 
 
+def migrate_v031():
+    """V0.3.1：合并同班同日同节次的重复课次（V0.2 迁移产生的幽灵课次）。"""
+    data = read_data()
+    if stu.migrate_v031_data(data):
+        write_data(data)
+        print(f"[学生管理系统] 已合并重复课次")
+
+
 def read_settings():
     if not SETTINGS_FILE.exists(): return DEFAULT_SETTINGS.copy()
     try:
@@ -887,7 +895,7 @@ class App(SimpleHTTPRequestHandler):
             cls_id = query.get("classId", [""])[0]
             rows = [s for s in data["students"] if not cls_id or s.get("classId") == cls_id]
             names = {c["id"]: c["name"] for c in data["classes"]}
-            payload = stu.students_csv(rows, names).encode("utf-8-sig")
+            payload = stu.students_csv(rows, names).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
             self.send_header("Content-Disposition", "attachment; filename=students.csv")
@@ -909,7 +917,7 @@ class App(SimpleHTTPRequestHandler):
             for p in perfs:
                 a = amap.get(p.get("assignmentId", ""), {})
                 p["lessonLabel"] = f"{a.get('date', '')} 第{a.get('period') or '?'}节 {a.get('title', '')}".strip()
-            lessons = [l for l in data["lessons"] if sid in (l.get("rosterIds") or []) or l.get("classId") == st.get("classId")]
+            lessons = [l for l in data["lessons"] if sid in (l.get("rosterIds") or []) or sid in (l.get("extraStudentIds") or [])]
             lessons = sorted(lessons, key=lambda l: (l.get("date", ""), l.get("period", "")), reverse=True)[:8]
             lesson_rows = [{"id": l["id"], "date": l.get("date"), "period": l.get("period"), "status": l.get("status"),
                             "statusName": LESSON_STATUSES.get(l.get("status"), l.get("status")),
@@ -976,7 +984,7 @@ class App(SimpleHTTPRequestHandler):
                                                     "toClassId": cls_id, "action": "enroll", "reason": "批量导入",
                                                     "operatedBy": self.user["id"], "operatedAt": now})
             write_data(data)
-            return self.send_json({"imported": len(new_students)}, 201)
+            return self.send_json({"imported": len(new_students), "created": len(new_students), "updated": 0}, 201)
         parts = path.strip("/").split("/")
         if len(parts) == 4 and parts[1] == "students":
             st = next((s for s in data["students"] if s["id"] == parts[2]), None)
@@ -1041,7 +1049,8 @@ class App(SimpleHTTPRequestHandler):
 
     def backup_get(self):
         """下载完整业务数据备份（zip：data.json + uploads + agent输出 + agents + meta）。
-        不包含 ~/.student-stats 下的密钥与账号信息。"""
+        不包含 ~/.student-stats 下的密钥与账号信息。仅管理员可用。"""
+        if not self.require_admin(): return
         import zipfile
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1063,27 +1072,41 @@ class App(SimpleHTTPRequestHandler):
         self.end_headers(); self.wfile.write(payload)
 
     def backup_restore(self, body):
-        """从备份恢复：校验格式 → 备份当前数据到 ~/.student-stats/restore-backups → 写入。"""
+        """从备份恢复：仅管理员；白名单校验 → 备份当前数据 → 临时目录解压验证 → 替换。"""
+        if not self.require_admin(): return
         if not body.get("confirm"): raise ValueError("请在请求中带上 confirm 确认恢复")
         raw = body.get("data", "")
         header, encoded = raw.split(",", 1) if "," in raw else ("", "")
         if not raw.startswith("data:application/zip") and not raw.startswith("data:application/x-zip"):
             raise ValueError("请上传 .zip 格式的备份文件")
         import zipfile
-        buf = io.BytesIO(base64.b64decode(encoded))
+        zip_bytes = base64.b64decode(encoded)
+        if len(zip_bytes) > 200 * 1024 * 1024: raise ValueError("备份文件超过 200MB")
+        buf = io.BytesIO(zip_bytes)
         with zipfile.ZipFile(buf) as zf:
             names = zf.namelist()
             if "data.json" not in names: raise ValueError("备份中没有 data.json")
+            # 白名单：只允许 data.json、backup_meta.json、uploads/、agents/、agent输出/ 下的文件
+            allowed_top = {"data.json", "backup_meta.json", "uploads", "agents", "agent输出"}
+            for name in names:
+                parts = Path(name).parts
+                if not parts: continue
+                if parts[0] not in allowed_top: raise ValueError(f"备份包含不允许的目录或文件：{parts[0]}")
+                if ".." in parts or name.startswith("/"): raise ValueError(f"备份包含非法路径：{name}")
+                info = zf.getinfo(name)
+                if info.is_dir(): continue
+                # 拒绝符号链接
+                if info.external_attr >> 16 & 0o120000 == 0o120000: raise ValueError(f"备份包含符号链接：{name}")
+                if info.file_size > 50 * 1024 * 1024: raise ValueError(f"备份中文件过大：{name}")
+            # 压缩比例检查（防 zip bomb）
+            total_uncompressed = sum(zf.getinfo(n).file_size for n in names if not zf.getinfo(n).is_dir())
+            if len(zip_bytes) > 0 and total_uncompressed / len(zip_bytes) > 500: raise ValueError("压缩比例异常，疑似恶意备份包")
             # 校验 data.json 格式
             raw_data = zf.read("data.json").decode("utf-8")
             try:
                 test = json.loads(raw_data)
                 for k in DEFAULT: test.setdefault(k, DEFAULT[k].copy() if isinstance(DEFAULT[k], list) else DEFAULT[k])
             except json.JSONDecodeError: raise ValueError("data.json 格式损坏")
-            # 禁止路径穿越
-            for name in names:
-                parts = Path(name).parts
-                if ".." in parts or name.startswith("/"): raise ValueError(f"备份包含非法路径：{name}")
             # 备份当前数据到恢复备份目录
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             rb = CONFIG_DIR / "restore-backups" / ts
@@ -1092,14 +1115,32 @@ class App(SimpleHTTPRequestHandler):
             if UPLOADS.is_dir() and any(UPLOADS.iterdir()): shutil.copytree(UPLOADS, rb / "uploads", dirs_exist_ok=True)
             if AGENT_OUTPUT_DIR.is_dir(): shutil.copytree(AGENT_OUTPUT_DIR, rb / "agent输出", dirs_exist_ok=True)
             if AGENTS_DIR.is_dir(): shutil.copytree(AGENTS_DIR, rb / "agents", dirs_exist_ok=True)
-            # 清空并恢复
+            # 先解压到临时目录验证
+            tmp = CONFIG_DIR / "restore-tmp"
+            if tmp.exists(): shutil.rmtree(tmp)
+            tmp.mkdir()
+            try:
+                for name in names:
+                    if name == "data.json": continue
+                    zf.extract(name, tmp)
+                # 验证临时目录结构合法（再次确认只有白名单目录）
+                for item in tmp.iterdir():
+                    if item.name not in {"uploads", "agents", "agent输出"}: raise ValueError(f"临时目录出现非白名单内容：{item.name}")
+            except Exception:
+                shutil.rmtree(tmp, ignore_errors=True); raise
+            # 替换
             DATA_FILE.write_text(raw_data, encoding="utf-8")
             for d in (UPLOADS, AGENT_OUTPUT_DIR, AGENTS_DIR):
                 for f in list(d.rglob("*")) if d.is_dir() else []:
                     if f.is_file(): f.unlink()
             for name in names:
                 if name == "data.json": continue
-                zf.extract(name, ROOT)
+                src = tmp / name
+                if src.is_file():
+                    dst = ROOT / name
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+            shutil.rmtree(tmp, ignore_errors=True)
             buf.close()
         print(f"[学生管理系统] 备份已恢复到 {datetime.now().isoformat(timespec='seconds')}，旧数据备份在 {rb}")
         return self.send_json({"ok": True, "note": "账号和 API Key 不在备份中，需要重新配置；旧数据备份在 ~/.student-stats/restore-backups/" + ts})
@@ -1835,6 +1876,7 @@ if __name__ == "__main__":
     seed_agents()
     migrate_v02()
     migrate_v03()
+    migrate_v031()
     host = os.environ.get("STATS_HOST", "127.0.0.1")
     port = int(os.environ.get("STATS_PORT", "8765"))
     print(f"\n学生管理与统计系统已启动：http://{host}:{port}\n按 Ctrl+C 可停止服务。")

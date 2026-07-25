@@ -421,8 +421,19 @@
 	.stu-modal-card{width:96vw;padding:14px}
 	nav{grid-template-columns:1fr 1fr}
 	#import-text{font-size:12px}
-	aside{width:200px;padding:20px 12px}
-	main{padding:20px 16px}
+	aside{width:60px;padding:20px 6px;overflow:hidden}
+	aside .brand{font-size:0;gap:0;justify-content:center}
+	aside .brand::before{content:"✦";font-size:20px;color:#fff}
+	aside p,aside .side-note,.nav-sub{display:none}
+	nav .nav{font-size:0;padding:12px 6px;text-align:center;display:flex;justify-content:center;align-items:center;min-height:40px}
+	nav .nav::first-letter{font-size:18px}
+	.user-bar{flex-direction:column;gap:6px}
+	.user-bar button{font-size:0;padding:6px}
+	.user-bar button::after{content:"⏻";font-size:14px}
+	main{padding:20px 12px;width:calc(100% - 60px)}
+	header h1{font-size:22px}
+	.two-col,.grid{grid-template-columns:1fr}
+	.cards{grid-template-columns:1fr 1fr}
 	.stu-inline-form{flex-direction:column;align-items:stretch}
 	.stu-inline-form input,.stu-inline-form select{width:100%}
 }

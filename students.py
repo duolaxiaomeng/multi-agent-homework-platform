@@ -154,6 +154,9 @@ def parse_import_text(text):
     for raw in (text or "").splitlines():
         line = raw.strip().lstrip("﻿")
         if not line: continue
+        # 跳过 CSV 表头（从导出文件重新导入时）
+        first = re.split(r"[,，\t;；]", line)[0].strip()
+        if first in ("学号", "studentNo", "student_no", "no", "编号"): continue
         parts = [p.strip() for p in re.split(r"[,，\t;；]", line)]
         if len(parts) == 1:
             parts = [p for p in re.split(r"\s+", line) if p]
@@ -246,3 +249,50 @@ def students_csv(students, class_names):
                     class_names.get(s.get("classId"), ""), STUDENT_STATUSES.get(s.get("status"), s.get("status", "")),
                     s.get("enrollmentYear", ""), s.get("phone", ""), s.get("note", "")])
     return "﻿" + buf.getvalue()
+
+
+def dedup_lessons(data):
+    """V0.3.1：合并同班同日同节次的重复课次。
+    判断主记录：有考勤/提交/错题数据的优先，其次创建时间最早的。
+    返回 (合并数, 删除数)。幂等。"""
+    groups = {}
+    for l in data["lessons"]:
+        key = (l.get("classId", ""), l.get("date", ""), l.get("period", ""))
+        groups.setdefault(key, []).append(l)
+    merged = removed = 0
+    for key, lessons in groups.items():
+        if len(lessons) <= 1: continue
+        def score(l):
+            n = sum(1 for a in data["attendance"] if a["lessonId"] == l["id"])
+            n += sum(1 for s in data["submissions"] if s["lessonId"] == l["id"])
+            n += sum(1 for m in data["mistakes"] if m.get("lessonId") == l["id"])
+            return n
+        lessons.sort(key=lambda l: (-score(l), l.get("createdAt", "")))
+        keep = lessons[0]
+        for dup in lessons[1:]:
+            keep_roster = set(keep.get("rosterIds", []))
+            for coll in ("attendance", "submissions"):
+                keep_sids = {r["studentId"] for r in data[coll] if r["lessonId"] == keep["id"]}
+                for r in data[coll]:
+                    if r["lessonId"] == dup["id"] and r["studentId"] not in keep_sids:
+                        r["lessonId"] = keep["id"]
+            for m in data["mistakes"]:
+                if m.get("lessonId") == dup["id"]:
+                    m["lessonId"] = keep["id"]
+            for sid in dup.get("rosterIds", []):
+                if sid not in keep_roster:
+                    keep.setdefault("rosterIds", []).append(sid); keep_roster.add(sid)
+            data["lessons"] = [l for l in data["lessons"] if l["id"] != dup["id"]]
+            if dup.get("assignmentId"):
+                data["assignments"] = [a for a in data["assignments"] if a["id"] != dup["assignmentId"]]
+            removed += 1
+            merged += 1
+    return merged, removed
+
+
+def migrate_v031_data(data):
+    """V0.3.1：合并重复课次。幂等。"""
+    merged, removed = dedup_lessons(data)
+    if removed:
+        data["version"] = "v0.3.1"
+    return merged > 0
