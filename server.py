@@ -6,7 +6,7 @@ from urllib.parse import urlparse, unquote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from datetime import datetime
-import base64, hashlib, hmac, json, mimetypes, os, re, secrets, sqlite3, time, uuid
+import base64, hashlib, hmac, json, mimetypes, os, re, secrets, shutil, sqlite3, threading, time, uuid
 
 ROOT = Path(__file__).parent
 DATA_FILE = ROOT / "data.json"
@@ -18,7 +18,10 @@ USERS_FILE = CONFIG_DIR / "users.json"
 UPLOADS = ROOT / "uploads"
 UPLOADS.mkdir(exist_ok=True)
 
-DEFAULT = {"classes": [], "students": [], "assignments": [], "mistakes": [], "seats": [], "performances": []}
+DEFAULT = {"classes": [], "students": [], "assignments": [], "mistakes": [], "seats": [], "performances": [],
+           "lessons": [], "attendance": [], "submissions": [], "version": "v0.2"}
+DATA_VERSION = "v0.2"
+BACKUP_FILE = ROOT / "data_v1_backup.json"
 MODELS = {
     "qwen3.7-plus": {"provider": "阿里云百炼", "providerKey":"qwen", "model": "qwen3.7-plus", "label": "Qwen3.7 Plus｜效果优先"},
     "qwen3.6-flash": {"provider": "阿里云百炼", "providerKey":"qwen", "model": "qwen3.6-flash", "label": "Qwen3.6 Flash｜推荐"},
@@ -38,18 +41,61 @@ PBKDF2_ITERATIONS = 100_000
 ADMIN_USERNAME, ADMIN_PASSWORD = "root", "change-me-before-first-run"
 ROLES = {"admin": "管理员", "teacher": "老师", "student": "学生"}
 
+def _default_data():
+    return {k: (v.copy() if isinstance(v, list) else v) for k, v in DEFAULT.items()}
+
 def read_data():
     if not DATA_FILE.exists():
-        return DEFAULT.copy()
+        return _default_data()
     try:
         data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-        for key in DEFAULT: data.setdefault(key, [])
+        for key, default in DEFAULT.items():
+            data.setdefault(key, default.copy() if isinstance(default, list) else default)
         return data
     except (json.JSONDecodeError, OSError):
-        return DEFAULT.copy()
+        return _default_data()
+
+_DATA_LOCK = threading.Lock()
 
 def write_data(data):
-    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    with _DATA_LOCK:
+        DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def migrate_v02():
+    """升级到 V0.2 课次语义：自动备份 → 旧 assignments 镜像为 lessons（状态 completed）→
+    旧 mistakes 补 lessonId。幂等：version 已是 v0.2 直接跳过，重复启动不产生重复数据。"""
+    if DATA_FILE.exists() and not BACKUP_FILE.exists():
+        try:
+            shutil.copy2(DATA_FILE, BACKUP_FILE)
+            print(f"[学生管理系统] 已备份旧数据到 {BACKUP_FILE}")
+        except OSError as exc:
+            print(f"[学生管理系统] 数据备份失败：{exc}")
+    try:
+        raw = json.loads(DATA_FILE.read_text(encoding="utf-8")) if DATA_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        raw = {}
+    if raw.get("version") == DATA_VERSION and not raw.get("needs_images_backfill"): return  # 已迁移过（read_data 会自动补 version，不能用它判断）
+    data = read_data()
+    now = datetime.now().isoformat(timespec="seconds")
+    for a in data["assignments"]:
+        if any(l.get("assignmentId") == a["id"] for l in data["lessons"]): continue
+        data["lessons"].append({"id": make_id("lesson"), "assignmentId": a["id"], "classId": a.get("classId", ""),
+                                "date": a.get("date", ""), "period": str(a.get("period", "") or ""),
+                                "status": "completed", "createdBy": "", "createdAt": a.get("createdAt", "") or now, "updatedAt": now})
+    # 错题回填图片组：按 submissionId 关联该次提交的全部图片，供待确认页对照原图（幂等，每次启动都执行）。
+    sub_images = {s["id"]: s.get("images", []) for s in data["submissions"]}
+    lesson_by_assignment = {l["assignmentId"]: l["id"] for l in data["lessons"] if l.get("assignmentId")}
+    for m in data["mistakes"]:
+        m.setdefault("lessonId", lesson_by_assignment.get(m.get("assignmentId", ""), ""))
+        m.setdefault("submissionId", "")
+        m.setdefault("confidence", 0)
+        m.setdefault("reviewedBy", "")
+        m.setdefault("reviewedAt", "")
+        if not m.get("images"):
+            m["images"] = sub_images.get(m.get("submissionId", ""), []) or ([m["image"]] if m.get("image") else [])
+    data["version"] = DATA_VERSION
+    write_data(data)
+    print(f"[学生管理系统] 数据已检查/迁移到 {DATA_VERSION}：课次 {len(data['lessons'])} 个")
 
 def read_settings():
     if not SETTINGS_FILE.exists(): return DEFAULT_SETTINGS.copy()
@@ -200,7 +246,12 @@ def filtered_data(user):
         mistakes = [m for m in data["mistakes"] if m.get("assignmentId") in assignment_ids or m.get("studentId") in student_ids]
         seats = [s for s in data["seats"] if s["classId"] in class_ids]
         performances = [p for p in data["performances"] if p["classId"] in class_ids]
-        return {"classes": classes, "students": students, "assignments": assignments, "mistakes": mistakes, "seats": seats, "performances": performances}
+        lessons = [l for l in data["lessons"] if l["classId"] in class_ids]
+        lesson_ids = {l["id"] for l in lessons}
+        attendance = [a for a in data["attendance"] if a["lessonId"] in lesson_ids]
+        submissions = [s for s in data["submissions"] if s["lessonId"] in lesson_ids]
+        return {"classes": classes, "students": students, "assignments": assignments, "mistakes": mistakes, "seats": seats,
+                "performances": performances, "lessons": lessons, "attendance": attendance, "submissions": submissions}
     name = re.sub(r"\s+", "", user.get("realName", "") or user["username"])
     mine = [s for s in data["students"] if re.sub(r"\s+", "", s["name"]) == name]
     student_ids = {s["id"] for s in mine}
@@ -208,7 +259,8 @@ def filtered_data(user):
     assignment_ids = {m["assignmentId"] for m in mistakes}
     assignments = [a for a in data["assignments"] if a["id"] in assignment_ids]
     performances = [p for p in data["performances"] if p.get("studentId") in student_ids]
-    return {"classes": [], "students": mine, "assignments": assignments, "mistakes": mistakes, "seats": [], "performances": performances}
+    return {"classes": [], "students": mine, "assignments": assignments, "mistakes": mistakes, "seats": [],
+            "performances": performances, "lessons": [], "attendance": [], "submissions": []}
 
 def make_id(prefix):
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
@@ -255,6 +307,209 @@ AGENT_PROMPT = '''你是严谨的中小学教师错题分析助手。分析课�
 
 REPORT_PROMPT = '''你是严谨的中小学课堂内容整理助手。分析课堂内容报告（教案、板书或课堂记录）图片，提取本节课的主题、内容摘要与知识点。绝对不要猜测：图片模糊或内容无法确定时，在摘要中注明需老师补充。仅返回一个 JSON 对象，不要 Markdown：
 {"title":"本节课名称","lessonSummary":"课堂内容摘要","knowledgePoints":["知识点"]}'''
+
+# ---------------- V0.2 课次领域逻辑 ----------------
+LESSON_STATUSES = {"in_class": "上课中", "waiting_homework": "等待作业", "analyzing": "作业分析中", "pending_review": "待确认", "completed": "已完成"}
+ATTENDANCE_STATUSES = {"present": "已到", "late": "迟到", "leave": "请假", "absent": "缺勤", "early_leave": "早退"}
+SUBMISSION_STATUSES = {"not_submitted": "未收取", "submitted": "已收取", "uploaded": "已上传", "analyzing": "分析中",
+                       "pending_review": "待确认", "completed": "已完成", "not_required": "无需提交"}
+CONFIDENCE_THRESHOLD = 0.8
+
+WORK_ANALYZE_PROMPT = '''你是严谨的中小学作业批改助手。以下是老师指定的一名学生的作业图片（可能多张）。逐题识别：题号/题目、作答结果、是否存在错误、对应知识点、错误类型、判断依据、置信度。绝对不要猜测：无法判断正误、题目内容无法识别、知识点或错误类型不确定、疑似与其他题重复时，status 必须为 pending。只列出错误或有疑问的题目，全部正确时返回空列表。仅返回一个 JSON 对象，不要 Markdown：
+{"mistakes":[{"question":"题号与简短题目","knowledgePoint":"知识点或待确认","errorType":"知识点不理解/计算错误/审题错误/步骤不完整/答案表达错误/未作答/其他/待老师确认","status":"confirmed或pending","confidence":0到1之间数字,"reason":"判断依据（需指出图中证据）"}]}'''
+
+FEEDBACK_PROMPT = '''你是一名中小学课后反馈助手，服务对象是老师和家长。根据系统提供的真实材料生成学生本节课的反馈（Markdown）。
+要求：
+- 严格区分三类内容：【事实】考勤与作业提交情况；【老师记录】课堂表现原始记录（润色为家长易读的表述，先肯定再委婉建议）；【AI 判断】基于做题图片的错题分析（题号、知识点、错误类型）。
+- 材料不足的部分如实写明“本节课材料不足，未做评估”，禁止编造题目、分数或表现。
+- 语气对家长友好、具体，不用“差”“不行”等定性词。
+结构：## 学生姓名 / #### 考勤与作业 / #### 课堂表现 / #### 作业情况 / #### 课后建议'''
+
+def find_lesson(data, lesson_id):
+    return next((l for l in data["lessons"] if l["id"] == lesson_id), None)
+
+def lesson_in_scope(user, data, lesson):
+    """课次是否在当前用户可见范围内（与 filtered_data 规则一致）。"""
+    if not lesson: return False
+    if user.get("role") == "admin": return True
+    cls = next((c for c in data["classes"] if c["id"] == lesson["classId"]), None)
+    return bool(cls) and cls.get("ownerId") in (None, "", user["id"])
+
+def class_students(data, class_id):
+    return [s for s in data["students"] if s["classId"] == class_id]
+
+def lesson_students(data, lesson):
+    """一节课的完整名单：本班学生 + 调课加入的外班学生（extraStudentIds）。"""
+    base = class_students(data, lesson["classId"])
+    extra_ids = [x for x in lesson.get("extraStudentIds", []) if x]
+    extra = [s for s in data["students"] if s["id"] in extra_ids and s["classId"] != lesson["classId"]]
+    return base + extra
+
+def ensure_lesson_attendance(data, lesson, user):
+    """课次创建时为名单内学生生成默认“缺勤”考勤（含调课加入的外班学生）；
+    安排到座位上的学生会被改为“已到”。之后加入的学生不回填历史课次。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    existing = {a["studentId"] for a in data["attendance"] if a["lessonId"] == lesson["id"]}
+    for st in lesson_students(data, lesson):
+        if st["id"] in existing: continue
+        data["attendance"].append({"id": make_id("attendance"), "lessonId": lesson["id"], "studentId": st["id"],
+                                   "status": "absent", "note": "", "updatedBy": user.get("id", ""), "updatedAt": now})
+
+def seat_overrides(data, lesson):
+    """座位上有人的学生，其考勤判定为“已到”（覆盖默认/手动状态）；
+    手动改过非缺勤状态（迟到/请假/早退）的学生不被座位覆盖。"""
+    seated = {s["studentId"] for s in data["seats"] if s["classId"] == lesson["classId"] and s.get("studentId")}
+    overrides = {}
+    for a in data["attendance"]:
+        if a["lessonId"] != lesson["id"]: continue
+        sid = a["studentId"]
+        if sid in seated and a["status"] == "absent":
+            overrides[sid] = "present"
+    return overrides
+
+def effective_attendance(data, lesson):
+    """返回 {studentId: status}：座位有人即已到，其余按考勤记录（默认缺勤）。"""
+    att = {a["studentId"]: a["status"] for a in data["attendance"] if a["lessonId"] == lesson["id"]}
+    att.update(seat_overrides(data, lesson))
+    return att
+
+def lesson_pending_count(data, lesson_id):
+    return sum(1 for m in data["mistakes"] if m.get("lessonId") == lesson_id and m.get("status") == "pending")
+
+def recompute_lesson_status(data, lesson):
+    """根据待确认与作业分析进度自动推进课次状态（不回退人工设置的 in_class/waiting_homework）。"""
+    if lesson["status"] in ("in_class", "waiting_homework"): return
+    if lesson_pending_count(data, lesson["id"]) > 0:
+        lesson["status"] = "pending_review"
+    else:
+        subs = [s for s in data["submissions"] if s["lessonId"] == lesson["id"] and s.get("images")]
+        if subs and all(s.get("status") == "completed" for s in subs):
+            lesson["status"] = "completed"
+    lesson["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+
+def analyze_submission(data, lesson, submission):
+    """AI 分析一份学生作业（studentId 由服务端指定，AI 不参与归属判断）。返回 (新增错题, 待确认数)。"""
+    if not submission.get("images"): raise ValueError("该学生还没有作业图片，无法分析")
+    result = ask_agent(read_settings(), WORK_ANALYZE_PROMPT, [], submission["images"])
+    # 幂等：重新分析前清掉这份作业旧的 AI 结果（老师已确认过的保留）。
+    data["mistakes"] = [m for m in data["mistakes"]
+                        if not (m.get("submissionId") == submission["id"] and m.get("status") in ("pending",) and not m.get("reviewedBy"))]
+    saved = []
+    for m in result.get("mistakes", []):
+        conf = float(m.get("confidence", 0) or 0)
+        pending = m.get("status") != "confirmed" or conf < CONFIDENCE_THRESHOLD or not m.get("question")
+        item = {"id": make_id("mistake"), "lessonId": lesson["id"], "submissionId": submission["id"],
+                "studentId": submission["studentId"], "assignmentId": lesson.get("assignmentId", ""),
+                "question": m.get("question", "未能识别题目"), "knowledgePoint": m.get("knowledgePoint", "待确认"),
+                "errorType": m.get("errorType", "待老师确认"), "status": "pending" if pending else "confirmed",
+                "confidence": conf, "note": m.get("reason", ""), "image": submission["images"][0],
+                "images": submission["images"],
+                "reviewedBy": "", "reviewedAt": ""}
+        data["mistakes"].append(item); saved.append(item)
+    pending_n = sum(1 for m in saved if m["status"] == "pending")
+    submission["status"] = "pending_review" if pending_n else "completed"
+    submission["analyzedAt"] = datetime.now().isoformat(timespec="seconds")
+    submission["updatedAt"] = submission["analyzedAt"]
+    return saved, pending_n
+
+def lesson_summary(data, lesson):
+    """首页课次卡片摘要。座位有人即判定已到。名单含调课外班学生。"""
+    students = lesson_students(data, lesson)
+    att_eff = effective_attendance(data, lesson)
+    att_counts = {k: sum(1 for s in att_eff.values() if s == k) for k in ATTENDANCE_STATUSES}
+    # 没有考勤记录的学生按默认缺勤计
+    missing = len(students) - len(att_eff)
+    if missing > 0: att_counts["absent"] += missing
+    subs = [s for s in data["submissions"] if s["lessonId"] == lesson["id"]]
+    got = sum(1 for s in subs if s.get("images"))
+    analyzed = sum(1 for s in subs if s.get("status") in ("pending_review", "completed"))
+    return {"lesson": lesson, "studentCount": len(students), "attendance": att_counts,
+            "homework": {"submitted": got, "total": len(students), "analyzed": analyzed},
+            "pendingCount": lesson_pending_count(data, lesson["id"])}
+
+def build_insights(data, lesson):
+    """班级学情：统计只覆盖有证据的学生，缺勤/未交/未分析单独列出，不计入未掌握。座位有人即判定已到。名单含调课外班学生。"""
+    students = lesson_students(data, lesson)
+    att = effective_attendance(data, lesson)
+    subs = {s["studentId"]: s for s in data["submissions"] if s["lessonId"] == lesson["id"]}
+    mistakes = [m for m in data["mistakes"] if m.get("lessonId") == lesson["id"] and m.get("status") in ("confirmed", "pending")]
+    by_student = {}
+    for m in mistakes: by_student.setdefault(m.get("studentId", ""), []).append(m)
+    groups = {"absent": [], "not_submitted": [], "analyzing": [], "no_mistake": [], "has_mistake": [], "not_required": []}
+    for st in students:
+        a_st, sub = att.get(st["id"], "absent"), subs.get(st["id"])
+        if a_st in ("absent", "leave"): groups["absent"].append(st["name"]); continue
+        if sub and sub["status"] == "not_required": groups["not_required"].append(st["name"]); continue
+        if not sub or not sub.get("images"): groups["not_submitted"].append(st["name"]); continue
+        if sub.get("status") not in ("pending_review", "completed"): groups["analyzing"].append(st["name"]); continue
+        groups["has_mistake" if by_student.get(st["id"]) else "no_mistake"].append(st["name"])
+    kp, questions, etypes = {}, {}, {}
+    for m in mistakes:
+        if m.get("status") != "confirmed": continue
+        k, q = m.get("knowledgePoint", "待确认"), m.get("question", "未识别题目")
+        kp.setdefault(k, set()).add(m.get("studentId", ""))
+        questions[q] = questions.get(q, 0) + 1
+        etypes[m.get("errorType", "其他")] = etypes.get(m.get("errorType", "其他"), 0) + 1
+    att_counts = {k: sum(1 for s in att.values() if s == k) for k in ATTENDANCE_STATUSES}
+    missing = len(students) - len(att)
+    if missing > 0: att_counts["absent"] += missing
+    focus = sorted(((st["name"], len(by_student.get(st["id"], []))) for st in students if by_student.get(st["id"])),
+                   key=lambda x: -x[1])[:5]
+    return {"attendance": {"total": len(students), **att_counts},
+            "homework": {"submitted": sum(1 for s in subs.values() if s.get("images")), "total": len(students),
+                         "analyzed": sum(1 for s in subs.values() if s.get("status") in ("pending_review", "completed"))},
+            "pendingCount": lesson_pending_count(data, lesson["id"]),
+            "groups": groups,
+            "knowledgePoints": [{"knowledgePoint": k, "students": len(v)} for k, v in sorted(kp.items(), key=lambda x: -len(x[1]))],
+            "topQuestions": [{"question": q, "count": c} for q, c in sorted(questions.items(), key=lambda x: -x[1])[:8]],
+            "errorTypes": [{"errorType": k, "count": v} for k, v in sorted(etypes.items(), key=lambda x: -x[1])],
+            "focusStudents": [{"name": n, "mistakes": c} for n, c in focus]}
+
+def build_feedback(data, lesson, student, extra=""):
+    """学生个体反馈：缺勤/未交用客观模板直出；有证据时调 Agent 生成并保存 md。座位有人即判定已到。"""
+    att_eff = effective_attendance(data, lesson)
+    att_status = att_eff.get(student["id"], "absent")
+    sub = next((s for s in data["submissions"] if s["lessonId"] == lesson["id"] and s["studentId"] == student["id"]), None)
+    assignment = next((a for a in data["assignments"] if a["id"] == lesson.get("assignmentId")), {})
+    perfs = [p for p in data["performances"] if p.get("studentId") == student["id"] and p.get("assignmentId", "") == lesson.get("assignmentId")]
+    mistakes = [m for m in data["mistakes"] if m.get("lessonId") == lesson["id"] and m.get("studentId") == student["id"]
+                and m.get("status") in ("confirmed", "pending")]
+    head = f"## {student['name']}\n\n课程：{lesson.get('date') or '未排期'} 第{lesson.get('period') or '?'}节《{assignment.get('title', '未命名课程')}》\n\n"
+    if att_status in ("absent", "leave"):
+        return head + f"#### 考勤与作业\n本节课学生{ATTENDANCE_STATUSES[att_status]}，暂无完整课堂表现和作业证据，不做学习评价。\n", None
+    if not sub or not sub.get("images"):
+        return head + "#### 考勤与作业\n学生本节课已到课，但尚未提交作业，暂不生成作业掌握情况。\n", None
+    if sub.get("status") not in ("pending_review", "completed"):
+        return head + "#### 考勤与作业\n作业已上传，分析尚未完成，请先在“课后作业”中完成分析。\n", None
+    context = [f"学生：{student['name']}",
+               f"课程：{lesson.get('date') or '未排期'} 第{lesson.get('period') or '?'}节《{assignment.get('title', '未命名课程')}》",
+               f"课堂知识点：{'、'.join(assignment.get('knowledgePoints', [])) or '未记录'}",
+               f"考勤：{ATTENDANCE_STATUSES.get(att_status, '缺勤')}"]
+    for p in perfs:
+        detail = "；".join(x for x in [("标签：" + "、".join(p["tags"])) if p.get("tags") else "", p.get("note", ""), ("做题情况：" + p["workNote"]) if p.get("workNote") else ""] if x)
+        if detail: context.append(f"课堂表现（老师原始记录）：{detail}")
+    if mistakes:
+        context.append("AI 作业分析（错题）：")
+        context += [f"- {m['question']}（知识点：{m.get('knowledgePoint','待确认')}，错误类型：{m.get('errorType','待老师确认')}，{'已确认' if m['status']=='confirmed' else '待确认'}，依据：{m.get('note','')}）" for m in mistakes]
+    else:
+        context.append("AI 作业分析：未发现错题（图片识别结果）。")
+    if extra: context.append(f"老师补充：{extra}")
+    content = [{"type": "text", "text": "\n".join(context) + "\n\n请根据以上材料生成学生反馈（Markdown）。"}]
+    for img in sub["images"][:3]:
+        try:
+            raw, mime = image_part(img)
+            content += [{"type": "text", "text": "作业图片："}, {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{raw}"}}]
+        except ValueError:
+            pass
+    markdown = chat_model(read_settings(), FEEDBACK_PROMPT, [{"role": "user", "content": content}])
+    AGENT_OUTPUT_DIR.mkdir(exist_ok=True)
+    safe = re.sub(r'[\\/:*?"<>|\s]+', "_", student["name"])
+    path, n = AGENT_OUTPUT_DIR / f"反馈-{safe}-{lesson.get('date') or '未排期'}.md", 1
+    while path.exists():
+        n += 1; path = AGENT_OUTPUT_DIR / f"反馈-{safe}-{lesson.get('date') or '未排期'}-{n}.md"
+    path.write_text(markdown, encoding="utf-8")
+    return markdown, {"name": path.name, "url": f"/agent输出/{path.name}"}
+
 
 # ---------------- 学习总结 Agent ----------------
 # Agent 的“灵魂”按智能体分别保存在 agents/ 目录（一个 md 一个智能体），老师可在“设置”页管理。
@@ -517,6 +772,58 @@ class App(SimpleHTTPRequestHandler):
                 return self.send_json({"name": name, "soul": read_agent_soul(name, self.user), "source": soul_path(name, self.user)[1]})
             except ValueError as exc:
                 return self.send_json({"error": str(exc)}, 404)
+        if path == "/api/lessons":
+            if self.user.get("role") == "student": return self.send_json({"error": "学生账号无权查看"}, 403)
+            data = filtered_data(self.user)
+            cards = []
+            for l in sorted(data["lessons"], key=lambda x: (x.get("date", ""), x.get("period", "")), reverse=True):
+                cls = next((c for c in data["classes"] if c["id"] == l["classId"]), None)
+                summary = lesson_summary(data, l)
+                summary["className"] = cls["name"] if cls else "未分班"
+                summary["statusName"] = LESSON_STATUSES.get(l["status"], l["status"])
+                cards.append(summary)
+            return self.send_json({"lessons": cards})
+        if path.startswith("/api/lessons/"):
+            if self.user.get("role") == "student": return self.send_json({"error": "学生账号无权查看"}, 403)
+            data = read_data()
+            parts = path.strip("/").split("/")  # api, lessons, id, [sub]
+            lesson = find_lesson(data, parts[2] if len(parts) > 2 else "")
+            if not lesson or not lesson_in_scope(self.user, data, lesson): return self.send_json({"error": "课次不存在或无权访问"}, 404)
+            sub = parts[3] if len(parts) > 3 else ""
+            if not sub:
+                students = lesson_students(data, lesson)
+                att = [a for a in data["attendance"] if a["lessonId"] == lesson["id"]]
+                # 座位有人即判定已到：考勤列表应用座位覆盖后下发
+                overrides = seat_overrides(data, lesson)
+                for a in att:
+                    if a["studentId"] in overrides: a["status"] = overrides[a["studentId"]]
+                subs = [s for s in data["submissions"] if s["lessonId"] == lesson["id"]]
+                perfs = [p for p in data["performances"] if p.get("assignmentId", "") == lesson.get("assignmentId")]
+                mistakes = [m for m in data["mistakes"] if m.get("lessonId") == lesson["id"]]
+                seats = [s for s in data["seats"] if s["classId"] == lesson["classId"]]
+                cls = next((c for c in data["classes"] if c["id"] == lesson["classId"]), {})
+                assignment = next((a for a in data["assignments"] if a["id"] == lesson.get("assignmentId")), None)
+                return self.send_json({"lesson": lesson, "class": cls, "assignment": assignment, "students": students,
+                                       "attendance": att, "submissions": subs, "performances": perfs,
+                                       "mistakes": mistakes, "seats": seats, "pendingCount": lesson_pending_count(data, lesson["id"])})
+            if sub == "attendance":
+                # 座位有人即判定已到：返回应用座位覆盖后的考勤
+                raw_att = [a for a in data["attendance"] if a["lessonId"] == lesson["id"]]
+                overrides = seat_overrides(data, lesson)
+                for a in raw_att:
+                    if a["studentId"] in overrides: a["status"] = overrides[a["studentId"]]
+                return self.send_json({"attendance": raw_att})
+            if sub == "submissions":
+                subs = {s["studentId"]: s for s in data["submissions"] if s["lessonId"] == lesson["id"]}
+                rows = []
+                for st in lesson_students(data, lesson):
+                    s = subs.get(st["id"])
+                    rows.append({"student": st, "submission": s, "status": s["status"] if s else "not_submitted",
+                                 "imageCount": len(s.get("images", [])) if s else 0})
+                return self.send_json({"rows": rows})
+            if sub == "insights":
+                return self.send_json(build_insights(data, lesson))
+            return self.send_json({"error": "接口不存在"}, 404)
         if path == "/api/users":
             if not self.require_admin(): return
             store = read_users()
@@ -717,6 +1024,18 @@ class App(SimpleHTTPRequestHandler):
             if path == "/api/lessons":
                 class_id, date, period = body.get("classId", ""), body.get("date", ""), str(body.get("period", "")).strip()
                 if not class_id: raise ValueError("请选择班级")
+                cls = next((c for c in data["classes"] if c["id"] == class_id), None)
+                if not cls: raise ValueError("班级不存在")
+                if not date: date = datetime.now().strftime("%Y-%m-%d")
+                # 同一日期+节次只能有一节课（一个老师同一时间不可能同时上两个班的课）
+                clash = next((l for l in data["lessons"] if l.get("date", "") == date
+                              and str(l.get("period", "") or "") == period), None)
+                if clash:
+                    clash_cls = next((c for c in data["classes"] if c["id"] == clash["classId"]), None)
+                    clash_title = next((a.get("title", "") for a in data["assignments"] if a["id"] == clash.get("assignmentId")), "")
+                    return self.send_json({"error": f"{date} 第{period or '?'}节已有「{clash_cls['name'] if clash_cls else '其他班'}」的《{clash_title or '未命名'}》，同一时间段不能再开课",
+                                           "conflict": True, "blocking": True,
+                                           "existing": {"date": date, "period": period, "className": clash_cls["name"] if clash_cls else "", "title": clash_title}}, 409)
                 report_paths = body.get("reportImages", [])
                 if report_paths:
                     result = ask_agent(read_settings(), REPORT_PROMPT, report_paths, [])
@@ -725,10 +1044,214 @@ class App(SimpleHTTPRequestHandler):
                     title, content = body.get("title", "").strip(), body.get("content", "")
                     raw_kps = body.get("knowledgePoints", "")
                     kps = [k.strip() for k in re.split(r"[、,，]", raw_kps) if k.strip()] if isinstance(raw_kps, str) else raw_kps
-                    if not title: raise ValueError("请上传课堂内容报告，或手动填写课程名称")
-                assignment = {"id": make_id("assignment"), "title": title, "classId": class_id, "date": date, "period": period, "subject": "", "content": content, "knowledgePoints": kps, "createdAt": ""}
+                    if not title: title = f"{date} 第{period or '?'}节"
+                now = datetime.now().isoformat(timespec="seconds")
+                assignment = {"id": make_id("assignment"), "title": title, "classId": class_id, "date": date, "period": period, "subject": "", "content": content, "knowledgePoints": kps, "createdAt": now}
                 data["assignments"].append(assignment)
-                write_data(data); return self.send_json(assignment, 201)
+                lesson = {"id": make_id("lesson"), "assignmentId": assignment["id"], "classId": class_id, "date": date,
+                          "period": period, "status": "in_class", "createdBy": self.user["id"], "createdAt": now, "updatedAt": now,
+                          "extraStudentIds": []}
+                data["lessons"].append(lesson)
+                ensure_lesson_attendance(data, lesson, self.user)
+                write_data(data); return self.send_json({**assignment, "lessonId": lesson["id"], "lesson": lesson}, 201)
+            if path.startswith("/api/lessons/"):
+                parts = path.strip("/").split("/")  # api, lessons, id, [sub, subId...]
+                lesson = find_lesson(data, parts[2] if len(parts) > 2 else "")
+                if not lesson or not lesson_in_scope(self.user, data, lesson): raise ValueError("课次不存在或无权访问")
+                sub = parts[3] if len(parts) > 3 else ""
+                if not sub:
+                    # 修改课名 / 日期 / 节次（课名同步到关联的课堂内容）
+                    changed = False
+                    if body.get("date"): lesson["date"] = body["date"]; changed = True
+                    if "period" in body: lesson["period"] = str(body.get("period", "")).strip(); changed = True
+                    assignment = next((a for a in data["assignments"] if a["id"] == lesson.get("assignmentId")), None)
+                    if "title" in body and assignment is not None:
+                        assignment["title"] = body["title"].strip() or assignment["title"]; changed = True
+                    if not changed: raise ValueError("没有需要修改的内容")
+                    if assignment is not None:
+                        assignment["date"], assignment["period"] = lesson.get("date", ""), lesson.get("period", "")
+                    lesson["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+                    write_data(data); return self.send_json({"lesson": lesson})
+                if sub == "report":
+                    # 为已存在的课次补传课堂内容报告（每节课一次），AI 读取主题与知识点
+                    report_paths = [p for p in body.get("reportImages", []) if isinstance(p, str) and p.startswith("uploads/") and (ROOT / p).is_file()]
+                    if not report_paths: raise ValueError("请先上传课堂内容报告图片")
+                    assignment = next((a for a in data["assignments"] if a["id"] == lesson.get("assignmentId")), None)
+                    if not assignment:
+                        assignment = {"id": make_id("assignment"), "title": "", "classId": lesson["classId"], "date": lesson.get("date", ""),
+                                      "period": lesson.get("period", ""), "subject": "", "content": "", "knowledgePoints": [], "createdAt": ""}
+                        data["assignments"].append(assignment); lesson["assignmentId"] = assignment["id"]
+                    result = ask_agent(read_settings(), REPORT_PROMPT, report_paths, [])
+                    assignment["title"] = result.get("title") or assignment.get("title") or "课堂内容报告"
+                    assignment["content"] = result.get("lessonSummary", "")
+                    assignment["knowledgePoints"] = result.get("knowledgePoints", [])
+                    lesson["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+                    write_data(data); return self.send_json({"assignment": assignment, "lesson": lesson})
+                if sub == "status":
+                    status = body.get("status", "")
+                    if status not in LESSON_STATUSES: raise ValueError("课次状态不合法")
+                    lesson["status"] = status
+                    lesson["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+                    write_data(data); return self.send_json({"lesson": lesson})
+                if sub == "extra-students":
+                    # 调课：把外班学生加入本节课名单，或从名单移除
+                    sid = body.get("studentId", "")
+                    action = body.get("action", "add")
+                    st = next((s for s in data["students"] if s["id"] == sid), None)
+                    if not st: raise ValueError("学生不存在")
+                    if st["classId"] == lesson["classId"]: raise ValueError("该生是本班学生，无需作为调课生添加")
+                    extra = lesson.setdefault("extraStudentIds", [])
+                    if action == "add":
+                        if sid not in extra: extra.append(sid)
+                        # 为调课生补一条默认缺勤考勤
+                        if not any(a["lessonId"] == lesson["id"] and a["studentId"] == sid for a in data["attendance"]):
+                            data["attendance"].append({"id": make_id("attendance"), "lessonId": lesson["id"], "studentId": sid,
+                                                       "status": "absent", "note": "", "updatedBy": self.user["id"],
+                                                       "updatedAt": datetime.now().isoformat(timespec="seconds")})
+                    elif action == "remove":
+                        lesson["extraStudentIds"] = [x for x in extra if x != sid]
+                        data["attendance"] = [a for a in data["attendance"] if not (a["lessonId"] == lesson["id"] and a["studentId"] == sid)]
+                    else:
+                        raise ValueError("不支持的操作")
+                    lesson["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+                    write_data(data); return self.send_json({"lesson": lesson})
+                if sub == "attendance":
+                    records = body.get("records", [])
+                    if not isinstance(records, list): raise ValueError("考勤数据格式错误")
+                    student_ids = {s["id"] for s in lesson_students(data, lesson)}
+                    now = datetime.now().isoformat(timespec="seconds")
+                    for rec in records:
+                        sid, status = rec.get("studentId", ""), rec.get("status", "")
+                        if sid not in student_ids: continue
+                        if status not in ATTENDANCE_STATUSES: raise ValueError(f"考勤状态不合法：{status}")
+                        row = next((a for a in data["attendance"] if a["lessonId"] == lesson["id"] and a["studentId"] == sid), None)
+                        if not row:
+                            row = {"id": make_id("attendance"), "lessonId": lesson["id"], "studentId": sid}
+                            data["attendance"].append(row)
+                        row.update({"status": status, "note": rec.get("note", row.get("note", "")), "updatedBy": self.user["id"], "updatedAt": now})
+                    write_data(data)
+                    return self.send_json({"attendance": [a for a in data["attendance"] if a["lessonId"] == lesson["id"]]})
+                if sub == "submissions":
+                    sid = body.get("studentId", "")
+                    st = next((s for s in lesson_students(data, lesson) if s["id"] == sid), None)
+                    if not st: raise ValueError("学生不存在或不属于这节课的名单")
+                    images = [p for p in body.get("images", []) if isinstance(p, str) and p.startswith("uploads/") and (ROOT / p).is_file()]
+                    sub_row = next((s for s in data["submissions"] if s["lessonId"] == lesson["id"] and s["studentId"] == sid), None)
+                    now = datetime.now().isoformat(timespec="seconds")
+                    if not sub_row:
+                        sub_row = {"id": make_id("submission"), "lessonId": lesson["id"], "studentId": sid, "status": "not_submitted",
+                                   "images": [], "createdAt": now, "updatedAt": now, "analyzedAt": ""}
+                        data["submissions"].append(sub_row)
+                    for p in images:
+                        if p not in sub_row["images"]: sub_row["images"].append(p)
+                    if body.get("status") in SUBMISSION_STATUSES: sub_row["status"] = body["status"]
+                    elif images: sub_row["status"] = "uploaded"
+                    sub_row["updatedAt"] = now
+                    # 已完成课次收到补交：退回等待作业，分析后再推进。
+                    if images and lesson["status"] == "completed":
+                        lesson["status"] = "waiting_homework"; lesson["updatedAt"] = now
+                    write_data(data); return self.send_json({"submission": sub_row}, 201)
+                if sub == "analyze":
+                    targets = [s for s in data["submissions"] if s["lessonId"] == lesson["id"] and s.get("images")
+                               and s.get("status") in ("uploaded", "submitted", "analyzing")]
+                    lesson["status"] = "analyzing"; lesson["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+                    analyzed, failed, pending_total = 0, [], 0
+                    for s in targets:
+                        s["status"] = "analyzing"
+                        try:
+                            _, pend = analyze_submission(data, lesson, s)
+                            analyzed += 1; pending_total += pend
+                        except Exception as exc:
+                            s["status"] = "uploaded"
+                            name = next((x["name"] for x in data["students"] if x["id"] == s["studentId"]), s["studentId"])
+                            failed.append({"student": name, "error": str(exc)})
+                    recompute_lesson_status(data, lesson)
+                    write_data(data)
+                    return self.send_json({"analyzed": analyzed, "pending": pending_total, "failed": failed, "lesson": lesson})
+                if sub == "students" and len(parts) > 5 and parts[5] == "feedback":
+                    sid = parts[4]
+                    st = next((s for s in lesson_students(data, lesson) if s["id"] == sid), None)
+                    if not st: raise ValueError("学生不存在或不属于这节课的名单")
+                    if body.get("saveEdited"):
+                        # 保存老师修订版：不覆盖 AI 原稿，另存为 -修订.md
+                        text = body.get("markdown", "").strip()
+                        if not text: raise ValueError("没有可保存的内容")
+                        AGENT_OUTPUT_DIR.mkdir(exist_ok=True)
+                        safe = re.sub(r'[\\/:*?"<>|\s]+', "_", st["name"])
+                        path, n = AGENT_OUTPUT_DIR / f"反馈-{safe}-{lesson.get('date') or '未排期'}-修订.md", 1
+                        while path.exists():
+                            n += 1; path = AGENT_OUTPUT_DIR / f"反馈-{safe}-{lesson.get('date') or '未排期'}-修订-{n}.md"
+                        path.write_text(text, encoding="utf-8")
+                        return self.send_json({"file": {"name": path.name, "url": f"/agent输出/{path.name}"}}, 201)
+                    markdown, file = build_feedback(data, lesson, st, body.get("extra", "").strip())
+                    return self.send_json({"markdown": markdown, "file": file}, 201)
+                raise ValueError("接口不存在")
+            if path.startswith("/api/submissions/"):
+                parts = path.strip("/").split("/")  # api, submissions, id, images|analyze
+                sub_row = next((s for s in data["submissions"] if s["id"] == (parts[2] if len(parts) > 2 else "")), None)
+                lesson = find_lesson(data, sub_row["lessonId"]) if sub_row else None
+                if not sub_row or not lesson_in_scope(self.user, data, lesson): raise ValueError("作业提交不存在或无权访问")
+                action = parts[3] if len(parts) > 3 else ""
+                if action == "images":
+                    images = [p for p in body.get("images", []) if isinstance(p, str) and p.startswith("uploads/") and (ROOT / p).is_file()]
+                    if not images: raise ValueError("没有可追加的图片")
+                    for p in images:
+                        if p not in sub_row["images"]: sub_row["images"].append(p)
+                    sub_row["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+                    if sub_row["status"] in ("not_submitted", "submitted"): sub_row["status"] = "uploaded"
+                    if lesson["status"] == "completed":
+                        lesson["status"] = "waiting_homework"; lesson["updatedAt"] = sub_row["updatedAt"]
+                    write_data(data); return self.send_json({"submission": sub_row})
+                if action == "analyze":
+                    sub_row["status"] = "analyzing"
+                    lesson["status"] = "analyzing"
+                    try:
+                        saved, pend = analyze_submission(data, lesson, sub_row)
+                    except Exception:
+                        sub_row["status"] = "uploaded"; write_data(data); raise
+                    recompute_lesson_status(data, lesson)
+                    write_data(data)
+                    return self.send_json({"mistakes": saved, "pending": pend, "submission": sub_row, "lesson": lesson})
+                raise ValueError("接口不存在")
+            if path == "/api/mistakes/review-all":
+                lesson_id = body.get("lessonId", "")
+                lesson = find_lesson(data, lesson_id)
+                if not lesson or not lesson_in_scope(self.user, data, lesson): raise ValueError("课次不存在或无权访问")
+                now = datetime.now().isoformat(timespec="seconds")
+                n = 0
+                for m in data["mistakes"]:
+                    if m.get("lessonId") == lesson_id and m.get("status") == "pending":
+                        m["status"] = "confirmed"; m["reviewedBy"] = self.user["id"]; m["reviewedAt"] = now; n += 1
+                recompute_lesson_status(data, lesson)
+                write_data(data); return self.send_json({"confirmed": n, "lesson": lesson})
+            if path.startswith("/api/mistakes/") and path.endswith("/review"):
+                mid = path.strip("/").split("/")[2]
+                item = next((m for m in data["mistakes"] if m["id"] == mid), None)
+                if not item: raise ValueError("错题不存在")
+                action = body.get("action", "")
+                now = datetime.now().isoformat(timespec="seconds")
+                if action in ("confirm", "modify"):
+                    if action == "modify":
+                        for key in ("question", "knowledgePoint", "errorType", "note"):
+                            if body.get(key): item[key] = body[key]
+                    item["status"] = "confirmed"; item["reviewedBy"] = self.user["id"]; item["reviewedAt"] = now
+                elif action == "ignore":
+                    item["status"] = "ignored"; item["reviewedBy"] = self.user["id"]; item["reviewedAt"] = now
+                elif action == "not_a_mistake":
+                    item["status"] = "not_a_mistake"; item["reviewedBy"] = self.user["id"]; item["reviewedAt"] = now
+                elif action == "merge":
+                    merge_ids = [x for x in body.get("mergeIds", []) if x != mid]
+                    others = [m for m in data["mistakes"] if m["id"] in merge_ids]
+                    if not others: raise ValueError("请选择要合并的题目")
+                    item["question"] = "；".join([item["question"]] + [o["question"] for o in others])
+                    item["reviewedBy"] = self.user["id"]; item["reviewedAt"] = now
+                    drop = {o["id"] for o in others}
+                    data["mistakes"] = [m for m in data["mistakes"] if m["id"] not in drop]
+                else:
+                    raise ValueError("不支持的审核操作")
+                lesson = find_lesson(data, item.get("lessonId", ""))
+                if lesson: recompute_lesson_status(data, lesson)
+                write_data(data); return self.send_json({"mistake": item})
             if path == "/api/seat-layout":
                 class_id, rows, cols = body.get("classId", ""), int(body.get("rows", 0) or 0), int(body.get("cols", 0) or 0)
                 if not (1 <= rows <= 12 and 1 <= cols <= 12): raise ValueError("座位行数和列数需在 1-12 之间")
@@ -748,6 +1271,7 @@ class App(SimpleHTTPRequestHandler):
                     # 一名学生在一个班只占一个座位。
                     data["seats"] = [s for s in data["seats"] if not (s["classId"] == class_id and s.get("studentId") == student_id)]
                     data["seats"].append({"id": make_id("seat"), "classId": class_id, "row": row, "col": col, "studentId": student_id})
+                # 座位上有人的学生在考勤读取时自动判定为“已到”（见 effective_attendance），此处无需写考勤。
                 write_data(data); return self.send_json({"ok": True})
             if path == "/api/performances":
                 class_id, assignment_id = body.get("classId", ""), body.get("assignmentId", "")
@@ -772,6 +1296,9 @@ class App(SimpleHTTPRequestHandler):
                 data["assignments"].append(item)
             elif path == "/api/mistakes":
                 item = {"id": make_id("mistake"), "studentId": body.get("studentId", ""), "assignmentId": body.get("assignmentId", ""), "question": body.get("question", ""), "knowledgePoint": body.get("knowledgePoint", "待确认"), "errorType": body.get("errorType", "待老师确认"), "status": body.get("status", "confirmed"), "note": body.get("note", ""), "image": body.get("image", "")}
+                # 关联课次：按 assignmentId 找到对应 lesson，保证计入课次统计与待确认。
+                lesson = next((l for l in data["lessons"] if l.get("assignmentId") == item["assignmentId"]), None)
+                if lesson: item["lessonId"] = lesson["id"]
                 data["mistakes"].append(item)
             elif path == "/api/upload":
                 raw = body.get("data", "")
@@ -812,6 +1339,17 @@ class App(SimpleHTTPRequestHandler):
                 if name == "通用": return self.send_json({"error": "通用智能体不能删除"}, 400)
                 (AGENTS_DIR / f"{name}.md").unlink(); return self.send_json({"ok": True})
             return self.send_json({"error": "智能体不存在或无权删除"}, 404)
+        if collection == "lessons":
+            data = read_data()
+            lesson = find_lesson(data, item_id)
+            if not lesson or not lesson_in_scope(self.user, data, lesson):
+                return self.send_json({"error": "课次不存在或无权访问"}, 404)
+            lid = lesson["id"]
+            data["lessons"] = [l for l in data["lessons"] if l["id"] != lid]
+            data["attendance"] = [a for a in data["attendance"] if a.get("lessonId") != lid]
+            data["submissions"] = [s for s in data["submissions"] if s.get("lessonId") != lid]
+            data["mistakes"] = [m for m in data["mistakes"] if m.get("lessonId") != lid]
+            write_data(data); return self.send_json({"ok": True})
         plural = {"classes":"classes", "students":"students", "assignments":"assignments", "mistakes":"mistakes", "seats":"seats", "performances":"performances"}.get(collection)
         if not plural: return self.send_json({"error":"接口不存在"}, 404)
         data = read_data(); data[plural] = [x for x in data[plural] if x["id"] != item_id]
@@ -822,6 +1360,7 @@ if __name__ == "__main__":
     migrate_local_secrets()
     seed_admin()
     seed_agents()
+    migrate_v02()
     host = os.environ.get("STATS_HOST", "127.0.0.1")
     port = int(os.environ.get("STATS_PORT", "8765"))
     print(f"\n学生管理与统计系统已启动：http://{host}:{port}\n按 Ctrl+C 可停止服务。")
