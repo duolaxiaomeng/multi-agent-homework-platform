@@ -38,8 +38,9 @@ DEFAULT_SETTINGS = {"model": "qwen3.6-flash", "apiKeys": {}}
 # 登录令牌有效期：7 天；密码哈希：PBKDF2-HMAC-SHA256（Python 标准库实现，代替指南中的 BCrypt）。
 TOKEN_TTL = 7 * 24 * 3600
 PBKDF2_ITERATIONS = 100_000
-# 内置管理员账号：首次启动时自动创建。
-ADMIN_USERNAME, ADMIN_PASSWORD = "root", "change-me-before-first-run"
+# 首次启动时创建管理员。密码优先从环境变量读取；未配置时生成一次性随机密码。
+ADMIN_USERNAME = os.getenv("STUDENT_STATS_ADMIN_USERNAME", "root")
+ADMIN_PASSWORD = os.getenv("STUDENT_STATS_ADMIN_PASSWORD", "")
 ROLES = {"admin": "管理员", "teacher": "老师", "student": "学生"}
 
 def _default_data():
@@ -239,13 +240,19 @@ def parse_token(store, token):
         return None
 
 def seed_admin():
-    """首次启动时创建内置管理员账号 root。"""
+    """首次启动时创建管理员账号，不在源码中保存默认密码。"""
     store = read_users()
     if not any(u.get("role") == "admin" for u in store["users"]):
+        initial_password = ADMIN_PASSWORD or secrets.token_urlsafe(12)
         store["users"].append({"id": make_id("user"), "username": ADMIN_USERNAME, "realName": "管理员", "role": "admin",
-                               "passwordHash": hash_password(ADMIN_PASSWORD), "createdAt": datetime.now().isoformat(timespec="seconds"), "lastLoginAt": ""})
+                               "passwordHash": hash_password(initial_password), "createdAt": datetime.now().isoformat(timespec="seconds"), "lastLoginAt": ""})
         write_users(store)
         print(f"[学生管理系统] 已创建内置管理员账号：{ADMIN_USERNAME}")
+        if ADMIN_PASSWORD:
+            print("[学生管理系统] 初始密码已从 STUDENT_STATS_ADMIN_PASSWORD 读取。")
+        else:
+            print(f"[学生管理系统] 首次登录随机密码：{initial_password}")
+            print("[学生管理系统] 请登录后立即修改密码；该密码不会再次显示。")
 
 def make_user(username, password, real_name, role, student_id=""):
     return {"id": make_id("user"), "username": username, "realName": real_name, "role": role, "studentId": student_id,

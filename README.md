@@ -6,9 +6,17 @@
 
 双击 `启动系统.command`，浏览器自动打开 `http://localhost:8765`。首次双击如被 macOS 阻止，右键选"打开"。
 
-## 内置管理员账号
+## 首次登录
 
-用户名 `root`，密码 `change-me-before-first-run`。可管理全部班级、学生档案与账号，首次启动自动创建。
+首次启动会创建管理员账号 `root`，并在终端显示一次随机初始密码。登录后请立即修改密码。
+
+也可以在首次启动前通过环境变量指定管理员账号和密码：
+
+```bash
+export STUDENT_STATS_ADMIN_USERNAME="root"
+export STUDENT_STATS_ADMIN_PASSWORD="请替换为强密码"
+python3 server.py
+```
 
 ## 已实现功能（V0.3）
 
@@ -57,6 +65,7 @@
 
 - API Key 与账号密码哈希保存在 `~/.student-stats/settings.json` 和 `users.json`，位于项目目录外，随项目打包或 git push 不会泄露
 - 环境变量：`STUDENT_STATS_QWEN_KEY` / `_KIMI_KEY` / `_MIMO_KEY` / `_DEEPSEEK_KEY`（优先于设置页保存的 Key）
+- 管理员初始密码不写入源码；可通过 `STUDENT_STATS_ADMIN_PASSWORD` 设置，未设置时由系统随机生成
 - `.gitignore` 已排除：`data.json`、`uploads/`、`agent输出/`、`agent.md`、`agents/`、`.venv/`
 
 ## 数据迁移

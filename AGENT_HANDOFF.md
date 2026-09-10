@@ -49,7 +49,7 @@
 项目目录：
 
 ```text
-/Users/xiaomeng/Desktop/学生管理与统计
+./multi-agent-homework-platform
 ```
 
 关键文件：
@@ -71,7 +71,7 @@
 启动：
 
 ```bash
-cd '/Users/xiaomeng/Desktop/学生管理与统计'
+cd multi-agent-homework-platform
 python3 server.py
 ```
 
@@ -220,7 +220,7 @@ performances: id, classId, assignmentId, row, col, studentId, tags[], note, imag
 ### 登录与角色（已实现）
 
 - `users.json` 保存账号：`{"secret": "...", "users": [{"id", "username", "realName", "role", "passwordHash", "createdAt", "lastLoginAt"}]}`；`secret` 用于签发令牌，不要外泄。
-- 三种角色：`admin`（管理员）、`teacher`（老师）、`student`（学生）。首次启动自动创建内置管理员 `root` / `change-me-before-first-run`。
+- 三种角色：`admin`（管理员）、`teacher`（老师）、`student`（学生）。首次启动自动创建管理员；密码从 `STUDENT_STATS_ADMIN_PASSWORD` 读取，未配置时生成一次性随机密码并在终端显示。
 - 密码用 PBKDF2-HMAC-SHA256（10 万次迭代）加盐哈希；令牌为 HMAC-SHA256 签名的无状态令牌（7 天有效），前端存于 localStorage，请求头 `Authorization: Bearer <token>`。
 - 数据可见范围：管理员看全部；老师看自己创建的班级（`classes.ownerId`，无 ownerId 的旧数据所有老师可见）；学生按姓名匹配名单，只读自己的错题。
 - 学生账号所有写操作返回 403；账号管理接口仅管理员可用。
@@ -301,4 +301,3 @@ performances: id, classId, assignmentId, row, col, studentId, tags[], note, imag
 - AI 结果需坚持“置信度低即待确认”的红线。
 - 修改 `server.py` 后必须重启服务；前端文件修改后刷新浏览器即可。
 - `data.json`、`settings.json` 与 `uploads/` 是用户数据，调试时不要随意清空、覆盖或提交。
-
